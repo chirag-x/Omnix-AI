@@ -179,15 +179,15 @@ def generate_response(prompt: str, history: list, retries=1) -> dict:
         data = response.json()
         result = data["choices"][0]["message"]["content"].strip()
         
-        if result.startswith("```json"):
-            result = result[7:]
-        if result.startswith("```"):
-            result = result[3:]
-        if result.endswith("```"):
-            result = result[:-3]
-            
-        parsed_result = json.loads(result.strip())
-        return parsed_result
+        import re
+        # Bulletproof JSON extraction: find the first '{' and last '}'
+        match = re.search(r'\{.*\}', result, re.DOTALL)
+        if match:
+            clean_json = match.group(0)
+            parsed_result = json.loads(clean_json)
+            return parsed_result
+        else:
+            raise ValueError(f"No JSON object found in response: {result[:100]}...")
         
     except Exception as e:
         log.warning(f"Active model {ACTIVE_MODEL} failed: {e}.")
