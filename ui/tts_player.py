@@ -36,7 +36,12 @@ def play_audio_b64(audio_b64: str):
 
 def _play(audio_io: io.BytesIO):
     try:
-        pygame.mixer.music.load(audio_io, "mp3")
+        # Detect format from magic bytes: WAV starts with b'RIFF', MP3 starts with b'ID3' or 0xFF
+        header = audio_io.read(4)
+        audio_io.seek(0)
+        fmt = "wav" if header[:4] == b"RIFF" else "mp3"
+
+        pygame.mixer.music.load(audio_io, fmt)
         pygame.mixer.music.play()
         while pygame.mixer.music.get_busy():
             pygame.time.Clock().tick(10)

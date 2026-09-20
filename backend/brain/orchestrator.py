@@ -85,14 +85,26 @@ async def process_command(user_text: str, on_response):
 
         log.info(f"Extracted text_to_speak: {text_to_speak}")
         if text_to_speak and isinstance(text_to_speak, str):
-            forbidden_words = ["type", "typing", "press", "pressing", "click", "clicking", "wait", "waiting"]
-            if any(word in text_to_speak.lower() for word in forbidden_words):
-                log.info(f"TTS Silenced (Technical/Chatty): {text_to_speak}")
+            import re
+            # Only silence first-person robotic action narration like:
+            # "I am clicking", "I'm typing", "Now pressing", "I will click"
+            # This does NOT silence natural speech that happens to contain words like
+            # "wait", "type", "play", "click" in conversation.
+            _ROBOTIC_PATTERNS = re.compile(
+                r"\b("
+                r"i(?:'m|\s+am)\s+(?:now\s+)?(?:clicking|typing|pressing|waiting|scrolling|opening|closing|searching|dragging)|"
+                r"i\s+(?:will|shall)\s+(?:now\s+)?(?:click|type|press|wait|scroll|open|close|search|drag|clicking|typing|pressing|scrolling)|"
+                r"now\s+(?:clicking|typing|pressing|waiting|scrolling|opening|searching)"
+                r")\b",
+                re.IGNORECASE
+            )
+            if _ROBOTIC_PATTERNS.search(text_to_speak):
+                log.info(f"TTS Silenced (Robotic narration): {text_to_speak}")
                 # Still update UI text, just no audio
                 if on_response:
                     on_response(text_to_speak, response.get("emotion", "neutral"), "")
             else:
-                audio_b64 = await generate_audio(text_to_speak)
+                audio_b64 = await generate_audio(text_to_speak, emotion=response.get("emotion", "neutral"))
                 if on_response:
                     on_response(text_to_speak, response.get("emotion", "neutral"), audio_b64)
 

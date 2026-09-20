@@ -1,40 +1,39 @@
 import threading
 import time
-import speech_recognition as sr
-import io
-from faster_whisper import WhisperModel
+import pyaudio
+import numpy as np
+from openwakeword.model import Model
 from utils.logger import log
-from core.config import Config
 from core.settings import SettingsManager
 
 class WakeEngine:
     """
-    Uses SpeechRecognition to detect when someone is talking, 
-    and passes the audio to a tiny Whisper model to check for the wake word.
+    Uses openWakeWord to detect custom wake words with zero latency.
     """
     def __init__(self, on_wake_detected):
         self.on_wake_detected = on_wake_detected
         self._running = False
         self._awake = False
-        self._model = None
-        self._recognizer = sr.Recognizer()
-        
-        # Tune dynamic thresholding to ignore breathing/air but catch speech reliably
-        self._recognizer.energy_threshold = 150 
-        self._recognizer.dynamic_energy_threshold = True
-        self._recognizer.dynamic_energy_ratio = 1.2  # Require a louder spike (speaking) to trigger, ignoring low noise (default is 1.5)
-        self._recognizer.pause_threshold = 0.5  # Only wait 0.5s of silence before processing
-        self._recognizer.phrase_threshold = 0.5 # Ignore sounds shorter than 0.5s (like a quick breath or cough)
-        
-        self._stop_listening_func = None
+        self._oww_model = None
+        self._audio = None
+        self._mic_stream = None
 
     @property
     def model(self):
-        """Return the loaded WhisperModel so CommandListener can reuse it."""
-        return self._model
+        """Return the loaded OWW model to signal app.py that it's ready."""
+        return self._oww_model
 
     def set_awake(self, value: bool):
         self._awake = value
+        # Clear any accumulated audio when we wake up or go to sleep so we don't process old data
+        if not value and self._mic_stream:
+            try:
+                # Flush buffer
+                available = self._mic_stream.get_read_available()
+                if available > 0:
+                    self._mic_stream.read(available, exception_on_overflow=False)
+            except:
+                pass
 
     def start(self):
         self._running = True
@@ -42,29 +41,24 @@ class WakeEngine:
 
     def stop(self):
         self._running = False
-        if self._stop_listening_func:
-            self._stop_listening_func(wait_for_stop=False)
+        if self._mic_stream:
+            self._mic_stream.stop_stream()
+            self._mic_stream.close()
+        if self._audio:
+            self._audio.terminate()
 
     def _init_and_start(self):
-        model_name = SettingsManager.get("wakeword_model", "tiny.en")
-        import os
-        base_dir = SettingsManager.get("default_download_location", "E:/Coding/Omnix/Omnix/Default_Downloads")
-        local_path = os.path.join(base_dir, "model", model_name)
-        
-        if not os.path.exists(local_path):
-            log.error(f"WakeEngine ERROR: Model '{model_name}' not found in {local_path}. Please download the model first from the Settings menu.")
-            return
-
-        log.info(f"WakeEngine actively using model: [{model_name}] (Loaded from: {local_path})")
+        log.info("WakeEngine: Initializing openWakeWord...")
         try:
-            models_dir = Config.get_wakeword_models_dir()
-                
-            self._model = WhisperModel(
-                local_path, 
-                device="cpu", 
-                compute_type=Config.get_whisper_compute_type(),
-                download_root=models_dir
-            )
+            model_path = r"E:\Coding\Omnix\backend\models\wakeword\hey_jarvis_v0.1.onnx"
+            self._oww_model = Model(wakeword_models=[model_path], inference_framework="onnx")
+            
+            FORMAT = pyaudio.paInt16
+            CHANNELS = 1
+            RATE = 16000
+            CHUNK = 1280
+            
+            self._audio = pyaudio.PyAudio()
             
             import sounddevice as sd
             device_name = SettingsManager.get("audio_input_device")
@@ -77,64 +71,51 @@ class WakeEngine:
                             break
                 except:
                     pass
-            mic = sr.Microphone(device_index=dev_idx)
-            with mic as source:
-                log.info("WakeEngine: Calibrating ambient noise for 1 second...")
-                self._recognizer.adjust_for_ambient_noise(source, duration=1)
-                
-            log.info("WakeEngine: Ready! Listening for 'Hey Omnix'...")
             
-            # Start background listener
-            self._stop_listening_func = self._recognizer.listen_in_background(
-                source=mic, 
-                callback=self._audio_callback,
-                phrase_time_limit=3  # Stop capturing after 3 seconds to process instantly
+            self._mic_stream = self._audio.open(
+                format=FORMAT, 
+                channels=CHANNELS, 
+                rate=RATE, 
+                input=True, 
+                input_device_index=dev_idx,
+                frames_per_buffer=CHUNK
             )
+            
+            log.info("WakeEngine: Ready! Listening for wake word (Hey Jarvis)...")
             
             while self._running:
-                time.sleep(1)
-                
-        except Exception as e:
-            log.error(f"WakeEngine failed to start: {e}")
-
-    def _audio_callback(self, recognizer, audio):
-        if not SettingsManager.get("audio_input_enabled", True): return
-        if self._awake or not self._running:
-            return
-            
-        log.debug(f"WakeEngine: Sound detected! Processing through {SettingsManager.get('wakeword_model', 'tiny.en')}...")
-        try:
-            audio_io = io.BytesIO(audio.get_wav_data())
-            
-            # Use initial_prompt to heavily bias the model to recognize 'Omnix' instead of random words
-            segments, info = self._model.transcribe(
-                audio_io, 
-                beam_size=1, 
-                condition_on_previous_text=False,
-                vad_filter=False,
-                initial_prompt="Hey Omnix, Omnix, wake up." if SettingsManager.get("wakeword_phrase", "Any Wake Word") == "Any Wake Word" else f"{SettingsManager.get('wakeword_phrase')}, Omnix, wake up."
-            )
-            
-            transcript = " ".join([segment.text for segment in segments]).lower()
-            
-            if transcript.strip():
-                print(f"[DEBUG] Heard: '{transcript.strip()}'")
-                
-                # Ensure we use exactly the phrases requested
-                hardcoded_wake_words = ["hey omnix", "omnix", "hello omnix", "omnix wake up", "wake up", "wake up omnix"]
-                # Also include common misheard variations of "Omnix" and "wake up"
-                fallback_words = ["ponniks", "v x", "onix", "amics", "week up", "next week up", "vehicle", "o, n, x"]
-                
-                selected_phrase = SettingsManager.get('wakeword_phrase', 'Any Wake Word').lower()
-                if selected_phrase == 'any wake word':
-                    valid_phrases = hardcoded_wake_words + fallback_words
-                else:
-                    valid_phrases = [selected_phrase] + fallback_words
+                if not SettingsManager.get("audio_input_enabled", True):
+                    time.sleep(1)
+                    continue
                     
-                if any(word in transcript for word in valid_phrases):
-                    log.info(f"WakeEngine: Wake word detected! matched: '{transcript.strip()}'")
-                    if self.on_wake_detected:
-                        self.on_wake_detected()
+                if self._awake:
+                    time.sleep(0.1)
+                    continue
+                    
+                try:
+                    raw_audio = self._mic_stream.read(CHUNK, exception_on_overflow=False)
+                    audio_data = np.frombuffer(raw_audio, dtype=np.int16)
+                    
+                    # Log RMS occasionally to debug if mic is silent
+                    rms = np.sqrt(np.mean(audio_data.astype(np.float32)**2))
+                    
+                    prediction = self._oww_model.predict(audio_data)
+                    
+                    for mdl, score in prediction.items():
+                        # Debug: Print if it hears *something* close
+                        if score > 0.05:
+                            print(f"[DEBUG] OWW Score for {mdl}: {score:.4f} (Mic RMS: {rms:.1f})")
+                            
+                        # Standard openwakeword threshold is 0.5, but we lower it to 0.2 for easier triggering during testing
+                        if score > 0.20:
+                            log.info(f"WakeEngine: Wake word detected! ({mdl}: {score:.2f})")
+                            if self.on_wake_detected:
+                                self.on_wake_detected()
+                            time.sleep(2)
+                            
+                except OSError as e:
+                    log.error(f"WakeEngine read error: {e}")
+                    time.sleep(0.1)
                         
         except Exception as e:
-            log.error(f"WakeEngine processing error: {e}")
+            log.error(f"WakeEngine failed to start: {e}")

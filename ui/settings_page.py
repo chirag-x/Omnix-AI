@@ -416,9 +416,18 @@ def build_settings_page(page: ft.Page, on_back):
                 bind("wakeword_model", ft.Dropdown(label="Wake Word Whisper Model", options=get_stt_opts(), bgcolor=c_surface, color=c_text, border_color=c_border, border_radius=8), "tiny.en"),
                     bind("stt_model", ft.Dropdown(label="Speech-to-Text Whisper Model", options=get_stt_opts(), bgcolor=c_surface, color=c_text, border_color=c_border, border_radius=8), "medium"),
                 ft.Divider(color=c_border),
-                section_header("Text-to-Speech (TTS)"),
-                bind("tts_engine", ft.Dropdown(label="TTS Engine", options=[ft.dropdown.Option("Edge-TTS (Online)"), ft.dropdown.Option("Local")], bgcolor=c_surface, color=c_text, border_color=c_border, border_radius=8), "Edge-TTS (Online)"),
-                bind("ai_tone_language", ft.Dropdown(label="AI Tone / Language", options=[ft.dropdown.Option("English"), ft.dropdown.Option("Hinglish"), ft.dropdown.Option("Hindi")], bgcolor=c_surface, color=c_text, border_color=c_border, border_radius=8), "English"),
+                section_header("Audio Mode for Omnix", "Controls which voice engine Omnix uses to speak"),
+                bind("audio_mode", ft.Dropdown(
+                    label="Voice Mode",
+                    options=[
+                        ft.dropdown.Option("Natural", "Natural  —  Offline neural voice (Kokoro AI, recommended)"),
+                        ft.dropdown.Option("Script",  "Script   —  Online Microsoft voices (Edge-TTS, needs internet)"),
+                    ],
+                    bgcolor=c_surface, color=c_text, border_color=c_border, focused_border_color=accent, border_radius=8
+                ), "Natural"),
+                ft.Text("Natural: Fast, offline, emotional. Script: Online only, more voice choices.", size=11, color=c_sub, italic=True),
+                ft.Divider(color=c_border),
+                section_header("Text-to-Speech (TTS)", "Applies only in Script (Edge-TTS) mode"),
                 ft.Row([
                     bind("voice_selection", ft.Dropdown(label="Voice Selection", options=[ft.dropdown.Option(k, v) for k,v in _VOICES.items()], expand=True, bgcolor=c_surface, color=c_text, border_color=c_border, border_radius=8), "en-US-ChristopherNeural"),
                     ft.IconButton(ft.Icons.PLAY_CIRCLE_FILL_ROUNDED, icon_color=accent, icon_size=32, tooltip="Test Voice", on_click=test_tts_voice)
