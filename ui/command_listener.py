@@ -120,11 +120,13 @@ class CommandListener:
                     return
                     
                 log.info(f"Speech-to-Text Engine actively using model: [{model_name}] (Loaded from: {local_path})")
+                stt_device = SettingsManager.get("stt_device", "auto")
+                compute_t = "int8" if stt_device == "cpu" else "int8_float16"
                 
                 self._model = WhisperModel(
                     local_path,
-                    device="cpu",
-                    compute_type=Config.get_whisper_compute_type(),
+                    device=stt_device,
+                    compute_type=compute_t,
                     download_root=Config.get_wakeword_models_dir()
                 )
         except Exception as e:

@@ -96,8 +96,11 @@ def get_best_model():
             response = requests.post(url, headers=headers, json=payload, timeout=float(SettingsManager.get("backend_timeout", 30)))
             if response.status_code == 200:
                 return (model, time.time() - start)
-        except Exception:
-            pass
+            else:
+                log.warning(f"Test for {model} failed: HTTP {response.status_code} - {response.text}")
+        except Exception as e:
+            log.warning(f"Test for {model} threw exception: {e}")
+            
         return (model, float('inf'))
 
     with concurrent.futures.ThreadPoolExecutor(max_workers=max(1, len(models))) as executor:

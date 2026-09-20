@@ -38,3 +38,4 @@ backend/models/
 # VERY IMPORTANT: Prevents accidental leaks of API keys!
 omnix_settings.json
 .env
+/tests/

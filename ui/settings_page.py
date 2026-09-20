@@ -152,10 +152,15 @@ def build_settings_page(page: ft.Page, on_back):
         def run_test():
             import requests, time, concurrent.futures
             
-            # Read current values from the UI fields, not just saved settings
-            key = _settings_map["omniroute_dev_key"].value if "omniroute_dev_key" in _settings_map else settings.get("omniroute_dev_key", "")
-            models_str = _settings_map["omniroute_dev_models"].value if "omniroute_dev_models" in _settings_map else settings.get("omniroute_dev_models", "")
-            url_base = _settings_map["omniroute_dev_url"].value if "omniroute_dev_url" in _settings_map else settings.get("omniroute_dev_url", "")
+            # Read current values from the UI fields based on active mode
+            if activation_mode == "Basic Activation (Free AI)":
+                k_field, m_field, u_field = "omniroute_basic_key", "omniroute_basic_models", "omniroute_basic_url"
+            else:
+                k_field, m_field, u_field = "omniroute_dev_key", "omniroute_dev_models", "omniroute_dev_url"
+
+            key = _settings_map[k_field].value if k_field in _settings_map else settings.get(k_field, "")
+            models_str = _settings_map[m_field].value if m_field in _settings_map else settings.get(m_field, "")
+            url_base = _settings_map[u_field].value if u_field in _settings_map else settings.get(u_field, "")
             
             models = [m.strip() for m in models_str.split(",") if m.strip()]
             
@@ -184,9 +189,18 @@ def build_settings_page(page: ft.Page, on_back):
                     if resp.status_code == 200:
                         return f"✅ {model} (Online)"
                     else:
-                        return f"❌ {model} (Error {resp.status_code})"
+                        err_text = resp.text
+                        import json
+                        try:
+                            # Try to extract a clean message from OpenRouter/OpenAI JSON format
+                            j = json.loads(err_text)
+                            if "error" in j and "message" in j["error"]:
+                                err_text = j["error"]["message"]
+                        except:
+                            pass
+                        return f"❌ {model} (Failed: {resp.status_code} - {err_text})"
                 except Exception as ex:
-                    return f"❌ {model} (Offline/Timeout)"
+                    return f"❌ {model} (Offline/Timeout: {str(ex)})"
                     
             with concurrent.futures.ThreadPoolExecutor(max_workers=len(models)) as executor:
                 results = list(executor.map(test_single, models))
@@ -248,7 +262,7 @@ def build_settings_page(page: ft.Page, on_back):
                         ft.FilledButton("Test LLM Models", on_click=test_llm_models, bgcolor="#1a73e8", color="white")
                     ], spacing=10),
                     ft.Divider(color=c_border),
-                    bind("omniroute_autostart", ft.Switch(label="Auto-start OmniRoute server", active=True, active_color=accent, label_position=ft.LabelPosition.RIGHT), True)
+                    bind("omniroute_autostart", ft.Switch(label="Auto-start OmniRoute server", value=True, active_color=accent, label_position=ft.LabelPosition.RIGHT), True)
                 ])
             elif activation_mode == "Premium Activation (Paid AI)":
                 card_col.controls.extend([
@@ -259,6 +273,10 @@ def build_settings_page(page: ft.Page, on_back):
             elif activation_mode == "Basic Activation (Free AI)":
                 card_col.controls.extend([
                     make_field("OmniRoute API Key", "omniroute_basic_key", password=True), make_field("Models", "omniroute_basic_models", multiline=True), hint_models, make_field("Endpoint URL", "omniroute_basic_url"), hint_url,
+                    ft.Divider(color=c_border),
+                    ft.Row([
+                        ft.FilledButton("Test LLM Models", on_click=test_llm_models, bgcolor="#1a73e8", color="white")
+                    ])
                 ])
             elif activation_mode == "Free Local Activation (Ollama)":
                 card_col.controls.extend([
@@ -414,7 +432,16 @@ def build_settings_page(page: ft.Page, on_back):
                 ft.Divider(color=c_border),
                 section_header("Speech-to-Text (STT)"),
                 bind("wakeword_model", ft.Dropdown(label="Wake Word Whisper Model", options=get_stt_opts(), bgcolor=c_surface, color=c_text, border_color=c_border, border_radius=8), "tiny.en"),
-                    bind("stt_model", ft.Dropdown(label="Speech-to-Text Whisper Model", options=get_stt_opts(), bgcolor=c_surface, color=c_text, border_color=c_border, border_radius=8), "medium"),
+                bind("stt_model", ft.Dropdown(label="Speech-to-Text Whisper Model", options=get_stt_opts(), bgcolor=c_surface, color=c_text, border_color=c_border, border_radius=8), "medium"),
+                bind("stt_device", ft.Dropdown(
+                    label="STT Compute Device",
+                    options=[
+                        ft.dropdown.Option("auto", "Auto (GPU Preferred)"),
+                        ft.dropdown.Option("cuda", "CUDA (GPU Only)"),
+                        ft.dropdown.Option("cpu", "CPU Only")
+                    ],
+                    bgcolor=c_surface, color=c_text, border_color=c_border, border_radius=8
+                ), "auto"),
                 ft.Divider(color=c_border),
                 section_header("Audio Mode for Omnix", "Controls which voice engine Omnix uses to speak"),
                 bind("audio_mode", ft.Dropdown(

@@ -4,8 +4,11 @@ from faster_whisper import WhisperModel
 from utils.logger import log
 from core.config import Config
 
-log.info("Loading Whisper model from local path...")
-model = WhisperModel(Config.get_whisper_model_path(), device="cpu", compute_type=Config.get_whisper_compute_type())
+from core.settings import SettingsManager
+stt_dev = SettingsManager.get("stt_device", "auto")
+compute_t = "int8" if stt_dev == "cpu" else "int8_float16"
+log.info(f"Loading Whisper model from local path (device={stt_dev})...")
+model = WhisperModel(Config.get_whisper_model_path(), device=stt_dev, compute_type=compute_t)
 
 def transcribe_audio(audio_data: bytes) -> str:
     log.info("Transcribing audio...")

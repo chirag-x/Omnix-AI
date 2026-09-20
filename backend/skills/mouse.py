@@ -50,22 +50,44 @@ def click_element(name: str, timeout: float = 5.0) -> str:
             app = Desktop(backend="uia").window(handle=win._hWnd)
 
             # Search across all common interactive control types
+            exact_match = None
+            partial_match = None
+            
             for control_type in ["Button", "MenuItem", "ListItem", "Hyperlink", "CheckBox", "RadioButton", "Edit"]:
                 try:
                     controls = app.descendants(control_type=control_type)
                     for ctrl in controls:
                         ctrl_name = (ctrl.element_info.name or "").strip()
-                        if name.lower() in ctrl_name.lower() and ctrl_name:
-                            rect = ctrl.rectangle()
-                            cx = (rect.left + rect.right) // 2
-                            cy = (rect.top + rect.bottom) // 2
-                            # Ensure element is on screen
-                            if rect.width() > 0 and rect.height() > 0:
-                                log.info(f"Found '{ctrl_name}' at ({cx}, {cy}). Clicking.")
-                                ctrl.click_input()
-                                return f"Clicked element '{ctrl_name}' at ({cx}, {cy})."
+                        if not ctrl_name:
+                            continue
+                            
+                        # Ensure element has valid coordinates
+                        rect = ctrl.rectangle()
+                        if rect.width() <= 0 or rect.height() <= 0:
+                            continue
+                            
+                        # Check exact match first
+                        if name.lower() == ctrl_name.lower():
+                            exact_match = (ctrl, ctrl_name, rect)
+                            break
+                        # Check partial match as fallback
+                        elif name.lower() in ctrl_name.lower():
+                            if partial_match is None:
+                                partial_match = (ctrl, ctrl_name, rect)
+                                
+                    if exact_match:
+                        break
                 except Exception:
                     continue
+                    
+            target = exact_match or partial_match
+            if target:
+                ctrl, ctrl_name, rect = target
+                cx = (rect.left + rect.right) // 2
+                cy = (rect.top + rect.bottom) // 2
+                log.info(f"Found '{ctrl_name}' at ({cx}, {cy}) [Exact: {exact_match is not None}]. Clicking.")
+                ctrl.click_input()
+                return f"Clicked element '{ctrl_name}' at ({cx}, {cy})."
 
         except Exception as e:
             log.warning(f"click_element search error: {e}")
@@ -113,3 +135,55 @@ def find_window(app_name: str) -> str:
     except Exception as e:
         log.error(f"find_window error: {e}")
         return f"Error focusing window '{app_name}': {e}"
+
+
+def click_text(text: str, timeout: float = 5.0) -> str:
+    """
+    Find exact text visually on the active window using OCR and click it.
+    Bypasses UI Automation entirely. Perfect for web browsers and Electron apps.
+
+    Args:
+        text: The exact text to find and click (case-insensitive).
+        timeout: How many seconds to wait for the text to appear.
+    """
+    import pytesseract
+    from PIL import ImageGrab
+    import os
+
+    # Ensure Tesseract path is set
+    tesseract_path = r"C:\Program Files\Tesseract-OCR\tesseract.exe"
+    if os.path.exists(tesseract_path):
+        pytesseract.pytesseract.tesseract_cmd = tesseract_path
+
+    log.info(f"Searching visually (OCR) for text: '{text}'")
+    deadline = time.time() + timeout
+    text_lower = text.lower()
+
+    while time.time() < deadline:
+        try:
+            win = gw.getActiveWindow()
+            if not win:
+                return "Error: No active window found for OCR."
+            
+            bbox = (win.left, win.top, win.right, win.bottom)
+            img = ImageGrab.grab(bbox)
+            data = pytesseract.image_to_data(img, output_type=pytesseract.Output.DICT)
+            
+            for i in range(len(data['text'])):
+                word = data['text'][i].strip().lower()
+                # Partial or exact match
+                if text_lower in word and len(word) > 2:
+                    x = win.left + data['left'][i] + (data['width'][i] // 2)
+                    y = win.top + data['top'][i] + (data['height'][i] // 2)
+                    
+                    if 0 <= y <= win.height and 0 <= x <= win.width:
+                        log.info(f"Found visual text '{word}' at ({x}, {y}). Clicking.")
+                        pyautogui.click(x=x, y=y)
+                        return f"Clicked visual text '{word}' at ({x}, {y})."
+                        
+        except Exception as e:
+            log.warning(f"click_text OCR error: {e}")
+            
+        time.sleep(0.5)
+        
+    return f"Error: Could not find the text '{text}' visually on the screen after {timeout:.0f}s."
