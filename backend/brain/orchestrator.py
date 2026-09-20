@@ -2,7 +2,7 @@ import asyncio
 import json
 import keyboard
 from brain.llm_provider import generate_response
-from brain.prompts import SYSTEM_PROMPT
+from brain.prompts import get_system_prompt
 from skills.registry import execute_skill
 from memory.short_term import ShortTermMemory
 from senses.speech import generate_audio
@@ -35,6 +35,8 @@ async def process_command(user_text: str, on_response):
     # Reset the step counter for this new command (each command gets a fresh 20-step budget)
     # Keep conversation history intact for context, only clear the action tracking
     memory.skill_history = []
+    
+    use_expert = False
 
     while True:
         if ABORT_FLAG:
@@ -54,7 +56,8 @@ async def process_command(user_text: str, on_response):
         memory.add_message("user", current_input)
 
         # 1. Think
-        response = generate_response(SYSTEM_PROMPT, memory.get_history())
+        prompt = get_system_prompt()
+        response = generate_response(prompt, memory.get_history(), expert_override=use_expert)
         log.info(f"Brain reasoning: {response.get('thought')}")
         log.info(f"Brain Raw JSON Output: {json.dumps(response, indent=2)}")
         memory.add_message("assistant", json.dumps(response))
@@ -151,6 +154,14 @@ async def process_command(user_text: str, on_response):
             skill = action.get("skill")
             args = action.get("args", {})
 
+            # ── Failsafe for hallucinated JSON schema (e.g., {"click": {"x": 10}}) ──
+            if not skill and len(action) == 1:
+                potential_skill = list(action.keys())[0]
+                if isinstance(action[potential_skill], dict):
+                    skill = potential_skill
+                    args = action[potential_skill]
+                    log.warning(f"Auto-fixed hallucinated JSON schema: {skill} -> {args}")
+
             if skill == "done":
                 log.info("Task completed by agent.")
                 is_done = True
@@ -166,6 +177,14 @@ async def process_command(user_text: str, on_response):
                 log.info("Agent used reply skill. Treating as task complete.")
                 is_done = True
                 break
+                
+            if skill == "handoff_to_expert":
+                query = args.get("query", original_goal)
+                log.info(f"Handoff to expert requested. Query: {query}")
+                use_expert = True
+                current_input = f"[SYSTEM_OVERRIDE] The Fast Model handed this task to you (The Expert). Query: {query}"
+                observations.append(f"Handed off to expert model: {query}")
+                break
 
             memory.track_skill(skill, args)
 
@@ -178,7 +197,8 @@ async def process_command(user_text: str, on_response):
                 observations.append(loop_msg)
                 # Inject it into history so the next LLM turn is forced to use 'done'
                 memory.add_message("user", loop_msg)
-                response2 = generate_response(SYSTEM_PROMPT, memory.get_history())
+                prompt_str = get_system_prompt()
+                response2 = generate_response(prompt_str, memory.get_history(), expert_override=use_expert)
                 text2 = response2.get("text", "I'm stuck and cannot complete this task.")
                 audio_b64 = await generate_audio(text2)
                 if on_response:
@@ -188,9 +208,18 @@ async def process_command(user_text: str, on_response):
 
             obs = await asyncio.to_thread(execute_skill, skill, args)
             observations.append(obs)
+            
+            # HALT ON ERROR: If a skill fails, do not blindly execute the rest of the chain.
+            if isinstance(obs, str) and obs.startswith("Error"):
+                log.warning(f"Skill '{skill}' returned an Error. Halting action chain.")
+                break
 
         if is_done:
             break
+            
+        # Skip the standard verification format if we just handed off
+        if use_expert and observations and "Handed off to expert" in observations[-1]:
+            continue
 
         # 4. Verify (Feed back)
         obs_text = "\n".join(observations)

@@ -49,3 +49,8 @@ def clear_and_type(x: int, y: int, text: str) -> str:
     pyperclip.copy(original_clipboard)
     
     return f"Cleared field and typed: {text}"
+
+def wait(seconds: float) -> str:
+    log.info(f"Waiting {seconds} seconds...")
+    time.sleep(float(seconds))
+    return f"Waited {seconds} seconds."

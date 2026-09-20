@@ -107,7 +107,11 @@ class CommandListener:
 
     def _init_listener(self):
         try:
-            if self._model is None:
+            stt_device = SettingsManager.get("stt_device", "auto")
+            if stt_device == "cloud_groq":
+                self._model = "cloud_groq"
+                log.info("Speech-to-Text Engine actively using Groq Cloud API.")
+            elif self._model is None:
                 import os
                 from faster_whisper import WhisperModel
                 from core.config import Config
@@ -120,7 +124,6 @@ class CommandListener:
                     return
                     
                 log.info(f"Speech-to-Text Engine actively using model: [{model_name}] (Loaded from: {local_path})")
-                stt_device = SettingsManager.get("stt_device", "auto")
                 compute_t = "int8" if stt_device == "cpu" else "int8_float16"
                 
                 self._model = WhisperModel(
@@ -134,7 +137,23 @@ class CommandListener:
             return
 
         try:
-            self._mic = sr.Microphone()
+            mic_name = SettingsManager.get("audio_input_device", "Default System Microphone")
+            mic_idx = None
+            if mic_name and mic_name != "Default System Microphone":
+                import pyaudio
+                pa = pyaudio.PyAudio()
+                try:
+                    for i in range(pa.get_device_count()):
+                        d = pa.get_device_info_by_index(i)
+                        name = d.get('name', '')
+                        if (mic_name in name or name in mic_name) and d.get('maxInputChannels', 0) > 0:
+                            mic_idx = i
+                            log.info(f"CommandListener: Selected Microphone [{i}]: {name}")
+                            break
+                finally:
+                    pa.terminate()
+            
+            self._mic = sr.Microphone(device_index=mic_idx)
             with self._mic as source:
                 log.info("CommandListener: Calibrating ambient noise...")
                 self._recognizer.adjust_for_ambient_noise(
@@ -158,9 +177,9 @@ class CommandListener:
 
         # ── TTS guard: never hear own voice ────────────────────────────────────
         try:
-            from tts_player import is_playing
-            if is_playing():
-                log.debug("CommandListener: Ignoring audio — TTS is playing.")
+            from tts_player import recently_played
+            if recently_played(buffer_seconds=2.0):
+                log.debug("CommandListener: Ignoring audio — TTS was recently playing.")
                 return
         except Exception:
             pass  # If tts_player import fails, continue anyway
@@ -174,22 +193,50 @@ class CommandListener:
 
         # ── Transcribe ─────────────────────────────────────────────────────────
         try:
-            audio_io = io.BytesIO(audio.get_wav_data())
             if not self._model: return
-            segments, _ = self._model.transcribe(
-                audio_io,
-                beam_size=1,
-                condition_on_previous_text=False,
-                vad_filter=True,
-                vad_parameters={"min_silence_duration_ms": 400},
-            )
-            transcript = " ".join(s.text for s in segments).strip()
+            
+            if self._model == "cloud_groq":
+                import requests
+                api_key = SettingsManager.get("groq_api_key", "")
+                stt_model = SettingsManager.get("groq_stt_model", "whisper-large-v3-turbo")
+                if not api_key:
+                    log.error("CommandListener: Groq API Key is missing!")
+                    self._notify_speech_end()
+                    return
+                
+                # Send to Groq
+                wav_data = audio.get_wav_data()
+                files = {"file": ("audio.wav", wav_data, "audio/wav")}
+                data = {"model": stt_model, "language": "en"}
+                headers = {"Authorization": f"Bearer {api_key}"}
+                
+                response = requests.post("https://api.groq.com/openai/v1/audio/transcriptions", headers=headers, files=files, data=data, timeout=10)
+                if response.status_code == 200:
+                    transcript = response.json().get("text", "").strip()
+                else:
+                    log.error(f"Groq API Error: {response.status_code} - {response.text}")
+                    transcript = ""
+            else:
+                audio_io = io.BytesIO(audio.get_wav_data())
+                segments, _ = self._model.transcribe(
+                    audio_io,
+                    beam_size=1,
+                    condition_on_previous_text=False,
+                    vad_filter=True,
+                    vad_parameters={"min_silence_duration_ms": 400},
+                )
+                transcript = " ".join(s.text for s in segments).strip()
         except Exception as e:
             log.error(f"CommandListener: Transcription error: {e}")
             self._notify_speech_end()
             return
 
         # ── Route result ────────────────────────────────────────────────────────
+        hallucinations = {"thank you.", "thank you", "thanks for watching.", "subscribe.", "subscribe", "you.", "you", "thanks.", "thanks"}
+        if transcript and transcript.strip().lower() in hallucinations:
+            log.debug(f"CommandListener: Ignored hallucination -> '{transcript}'")
+            transcript = ""
+
         if transcript and len(transcript) > 2:
             log.info(f"CommandListener: Heard → '{transcript}'")
             # Reset silence timer — user is active
@@ -224,7 +271,7 @@ class CommandListener:
         if self._is_processing:
             return
 
-        timeout = SettingsManager.get("sleep_timeout_seconds") or 30
+        timeout = SettingsManager.get("sleep_timeout_seconds") or 45
         self._silence_timer = threading.Timer(timeout, self._on_silence_timeout)
         self._silence_timer.daemon = True
         self._silence_timer.start()

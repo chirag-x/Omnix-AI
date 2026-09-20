@@ -1073,22 +1073,17 @@ class OmnixApp:
             pass
 
     def _quit_app(self):
-        if self.tray:
+        if hasattr(self, 'wake_engine') and self.wake_engine:
+            self.wake_engine.stop()
+        if hasattr(self, 'tray') and self.tray:
             self.tray.stop()
+            
         try:
             self.page.window.prevent_close = False
+            self.page.update()
             self.page.run_task(self.page.window.destroy)
         except Exception:
             pass
-            
-        import threading, time, os, subprocess
-        def kill_soon():
-            time.sleep(0.3)
-            # Use Windows taskkill to forcibly kill Python and the Flet UI child process
-            subprocess.Popen(f"taskkill /F /T /PID {os.getpid()}", shell=True)
-            
-        t = threading.Thread(target=kill_soon, daemon=True)
-        t.start()
 
     def _show_shortcuts(self, e):
         from core.settings import SettingsManager

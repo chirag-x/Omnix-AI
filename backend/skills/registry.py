@@ -1,7 +1,10 @@
-from skills.keyboard import press_key, type_text, clear_and_type
+from skills.keyboard import press_key, type_text, clear_and_type, wait
 from skills.mouse import click, scroll, click_element, find_window, click_text
 from perception.vision_engine import observe
 from skills.os_ops import verify_file, write_to_file
+
+from skills.memory import memorize_fact, forget_fact
+from skills.advanced_system import run_terminal_command, read_file, list_directory, web_search, search_files, open_file_or_folder
 
 SKILL_REGISTRY = {
     "press_key":     press_key,
@@ -15,6 +18,16 @@ SKILL_REGISTRY = {
     "observe":       observe,
     "verify_file":   verify_file,
     "write_to_file": write_to_file,
+    "run_terminal_command": run_terminal_command,
+    "read_file":     read_file,
+    "list_directory": list_directory,
+    "search_files":  search_files,
+    "open_file_or_folder": open_file_or_folder,
+    "web_search":    web_search,
+    "memorize_fact": memorize_fact,
+    "forget_fact":   forget_fact,
+    "wait":          wait,
+    "handoff_to_expert": lambda query, reasoning="": f"Handed off to expert model: {query}",
     "ask_user": lambda question="": f"Asked user: {question}. Waiting for voice response.",
     "reply":    lambda: "Responded to user.",
     "done":     lambda: "Task marked as done."

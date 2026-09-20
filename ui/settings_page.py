@@ -37,10 +37,18 @@ def get_audio_devices():
         import sounddevice as sd
         devices = sd.query_devices()
         in_names = [d['name'] for d in devices if d['max_input_channels'] > 0 and d['hostapi'] == 0 and "mapper" not in d['name'].lower()]
-        out_names = [d['name'] for d in devices if d['max_output_channels'] > 0 and d['hostapi'] == 0 and "mapper" not in d['name'].lower()]
         if in_names: inputs.extend(list(dict.fromkeys(in_names)))
+    except: pass
+    
+    try:
+        import pygame
+        pygame.mixer.init()
+        # Ensure pygame 2.0+ sdl2 module is loaded
+        import pygame._sdl2.audio as sdl2_audio
+        out_names = sdl2_audio.get_audio_device_names(False)
         if out_names: outputs.extend(list(dict.fromkeys(out_names)))
     except: pass
+    
     return inputs, outputs
 
 def build_settings_page(page: ft.Page, on_back):
@@ -156,7 +164,11 @@ def build_settings_page(page: ft.Page, on_back):
             if activation_mode == "Basic Activation (Free AI)":
                 k_field, m_field, u_field = "omniroute_basic_key", "omniroute_basic_models", "omniroute_basic_url"
             else:
-                k_field, m_field, u_field = "omniroute_dev_key", "omniroute_dev_models", "omniroute_dev_url"
+                dev_provider = settings.get("developer_provider", "OmniRouter")
+                if dev_provider == "Google AI Studio":
+                    k_field, m_field, u_field = "google_ai_key", "google_ai_models", "google_ai_url"
+                else:
+                    k_field, m_field, u_field = "omniroute_dev_key", "omniroute_dev_models", "omniroute_dev_url"
 
             key = _settings_map[k_field].value if k_field in _settings_map else settings.get(k_field, "")
             models_str = _settings_map[m_field].value if m_field in _settings_map else settings.get(m_field, "")
@@ -242,28 +254,62 @@ def build_settings_page(page: ft.Page, on_back):
             hint_models = ft.Text("Hint: Comma separated, e.g., 'gpt-4o, claude-3-sonnet'", size=11, color=c_sub)
             
             if activation_mode == "Developer Mode":
-                # Parse available models from the field itself to populate the dropdown
-                dev_mods = settings.get("omniroute_dev_models", "")
-                available = [m.strip() for m in dev_mods.split(",") if m.strip()]
-                force_opts = [ft.dropdown.Option("", "🤖 Auto  (let Omnix choose)")] + [ft.dropdown.Option(m) for m in available]
+                dev_provider = settings.get("developer_provider", "OmniRouter")
                 
-                card_col.controls.extend([
-                    make_field("OmniRoute API Key", "omniroute_dev_key", password=True),
-                    make_field("Models", "omniroute_dev_models", multiline=True), hint_models,
-                    make_field("Endpoint URL", "omniroute_dev_url"), hint_url,
-                    ft.Divider(color=c_border),
-                    bind("force_specific_model", ft.Dropdown(
-                        label="Force Specific Model (Override auto-selection)",
-                        options=force_opts,
-                        bgcolor=c_surface, color=c_text, border_color=c_border, border_radius=8
-                    ), ""),
-                    ft.Row([
-                        ft.FilledButton("Test Whisper Models", on_click=test_whisper_models, bgcolor="#1a73e8", color="white"),
-                        ft.FilledButton("Test LLM Models", on_click=test_llm_models, bgcolor="#1a73e8", color="white")
-                    ], spacing=10),
-                    ft.Divider(color=c_border),
-                    bind("omniroute_autostart", ft.Switch(label="Auto-start OmniRoute server", value=True, active_color=accent, label_position=ft.LabelPosition.RIGHT), True)
-                ])
+                def on_dev_provider_change(e):
+                    settings["developer_provider"] = e.control.value
+                    SettingsManager.set("developer_provider", e.control.value)
+                    render_content()
+                    page.update()
+
+                content_area.controls.insert(1, bind("developer_provider", ft.Dropdown(
+                    label="Developer Provider", value=dev_provider,
+                    options=[ft.dropdown.Option("OmniRouter"), ft.dropdown.Option("Google AI Studio")],
+                    on_select=on_dev_provider_change, bgcolor=c_surface, color=c_text, border_color=c_border, focused_border_color=accent, border_radius=8
+                ), "OmniRouter"))
+
+                if dev_provider == "OmniRouter":
+                    dev_mods = settings.get("omniroute_dev_models", "")
+                    available = [m.strip() for m in dev_mods.split(",") if m.strip()]
+                    force_opts = [ft.dropdown.Option("", "🤖 Auto  (let Omnix choose)")] + [ft.dropdown.Option(m) for m in available]
+                    card_col.controls.extend([
+                        section_header("OmniRouter Settings"),
+                        make_field("OmniRoute API Key", "omniroute_dev_key", password=True),
+                        make_field("Models", "omniroute_dev_models", multiline=True), hint_models,
+                        make_field("Endpoint URL", "omniroute_dev_url"), hint_url,
+                        ft.Divider(color=c_border),
+                        bind("force_specific_model", ft.Dropdown(
+                            label="Force Specific Model (Override auto-selection)",
+                            options=force_opts,
+                            bgcolor=c_surface, color=c_text, border_color=c_border, border_radius=8
+                        ), ""),
+                        ft.Row([
+                            ft.FilledButton("Test Whisper Models", on_click=test_whisper_models, bgcolor="#1a73e8", color="white"),
+                            ft.FilledButton("Test LLM Models", on_click=test_llm_models, bgcolor="#1a73e8", color="white")
+                        ], spacing=10),
+                        ft.Divider(color=c_border),
+                        bind("omniroute_autostart", ft.Switch(label="Auto-start OmniRoute server", value=True, active_color=accent, label_position=ft.LabelPosition.RIGHT), True)
+                    ])
+                else:
+                    google_mods = settings.get("google_ai_models", "gemini-2.0-flash-exp, gemini-1.5-pro")
+                    available = [m.strip() for m in google_mods.split(",") if m.strip()]
+                    force_opts = [ft.dropdown.Option("", "🤖 Auto  (let Omnix choose)")] + [ft.dropdown.Option(m) for m in available]
+                    card_col.controls.extend([
+                        section_header("Google AI Studio Settings"),
+                        make_field("Google AI API Key", "google_ai_key", password=True),
+                        make_field("Models", "google_ai_models", multiline=True, default="gemini-2.0-flash-exp, gemini-1.5-pro"), hint_models,
+                        make_field("Endpoint URL", "google_ai_url", default="https://generativelanguage.googleapis.com/v1beta/openai/"), hint_url,
+                        ft.Divider(color=c_border),
+                        bind("force_specific_model_google", ft.Dropdown(
+                            label="Force Specific Model (Override auto-selection)",
+                            options=force_opts,
+                            bgcolor=c_surface, color=c_text, border_color=c_border, border_radius=8
+                        ), ""),
+                        ft.Row([
+                            ft.FilledButton("Test Whisper Models", on_click=test_whisper_models, bgcolor="#1a73e8", color="white"),
+                            ft.FilledButton("Test LLM Models", on_click=test_llm_models, bgcolor="#1a73e8", color="white")
+                        ], spacing=10)
+                    ])
             elif activation_mode == "Premium Activation (Paid AI)":
                 card_col.controls.extend([
                     section_header("OpenAI"), make_field("API Key", "openai_key", password=True), make_field("Models", "openai_models", multiline=True), hint_models, make_field("Endpoint URL", "openai_url"), hint_url,
@@ -438,10 +484,13 @@ def build_settings_page(page: ft.Page, on_back):
                     options=[
                         ft.dropdown.Option("auto", "Auto (GPU Preferred)"),
                         ft.dropdown.Option("cuda", "CUDA (GPU Only)"),
-                        ft.dropdown.Option("cpu", "CPU Only")
+                        ft.dropdown.Option("cpu", "CPU Only"),
+                        ft.dropdown.Option("cloud_groq", "Cloud (Groq API - Instant)")
                     ],
                     bgcolor=c_surface, color=c_text, border_color=c_border, border_radius=8
                 ), "auto"),
+                make_field("Groq API Key", "groq_api_key", password=True),
+                make_field("Groq STT Model (e.g. whisper-large-v3-turbo)", "groq_stt_model", default="whisper-large-v3-turbo"),
                 ft.Divider(color=c_border),
                 section_header("Audio Mode for Omnix", "Controls which voice engine Omnix uses to speak"),
                 bind("audio_mode", ft.Dropdown(
@@ -459,6 +508,22 @@ def build_settings_page(page: ft.Page, on_back):
                     bind("voice_selection", ft.Dropdown(label="Voice Selection", options=[ft.dropdown.Option(k, v) for k,v in _VOICES.items()], expand=True, bgcolor=c_surface, color=c_text, border_color=c_border, border_radius=8), "en-US-ChristopherNeural"),
                     ft.IconButton(ft.Icons.PLAY_CIRCLE_FILL_ROUNDED, icon_color=accent, icon_size=32, tooltip="Test Voice", on_click=test_tts_voice)
                 ])
+            ])
+
+        elif current_tab == "Vision":
+            content_area.controls.extend([
+                section_header("Vision Engine (OCR & Image Processing)"),
+                ft.Text("Select the hardware device to process visual operations (EasyOCR).", size=14, color=c_sub),
+                bind("vision_device", ft.Dropdown(
+                    label="Compute Device",
+                    options=[
+                        ft.dropdown.Option("auto", "Auto (GPU Preferred)"),
+                        ft.dropdown.Option("cuda", "CUDA (GPU Only)"),
+                        ft.dropdown.Option("cpu", "CPU Only")
+                    ],
+                    bgcolor=c_surface, color=c_text, border_color=c_border, focused_border_color=accent, border_radius=8
+                ), "auto"),
+                ft.Text("Note: CUDA (GPU) is much faster but requires an NVIDIA graphics card. If you get 'pin_memory' errors, switch to CPU.", size=11, color=c_sub, italic=True),
             ])
 
         elif current_tab == "Help":
@@ -562,7 +627,7 @@ def build_settings_page(page: ft.Page, on_back):
             data=name, on_click=lambda e, n=name: select_tab(e, n), ink=True
         )
 
-    tabs = ["Activation", "Interface", "Appearance", "Audio", "Help", "Updates", "Other"]
+    tabs = ["Activation", "Interface", "Appearance", "Audio", "Vision", "Help", "Updates", "Other"]
     for t in tabs:
         tabs_column.controls.append(build_tab_btn(t, t == current_tab))
 

@@ -65,12 +65,15 @@ class WakeEngine:
             dev_idx = None
             if device_name and device_name != "Default System Microphone":
                 try:
-                    for i, d in enumerate(sd.query_devices()):
-                        if d['name'] == device_name and d['max_input_channels'] > 0:
+                    for i in range(self._audio.get_device_count()):
+                        d = self._audio.get_device_info_by_index(i)
+                        name = d.get('name', '')
+                        if (device_name in name or name in device_name) and d.get('maxInputChannels', 0) > 0:
                             dev_idx = i
+                            log.info(f"WakeEngine: Selected Microphone [{i}]: {name}")
                             break
-                except:
-                    pass
+                except Exception as e:
+                    log.warning(f"WakeEngine: Failed to match microphone: {e}")
             
             self._mic_stream = self._audio.open(
                 format=FORMAT, 

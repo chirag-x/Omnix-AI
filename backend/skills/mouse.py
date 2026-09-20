@@ -140,47 +140,106 @@ def find_window(app_name: str) -> str:
 def click_text(text: str, timeout: float = 5.0) -> str:
     """
     Find exact text visually on the active window using OCR and click it.
-    Bypasses UI Automation entirely. Perfect for web browsers and Electron apps.
-
-    Args:
-        text: The exact text to find and click (case-insensitive).
-        timeout: How many seconds to wait for the text to appear.
+    Attempts to use EasyOCR for hyper-accuracy, falls back to Tesseract.
     """
-    import pytesseract
-    from PIL import ImageGrab
     import os
-
-    # Ensure Tesseract path is set
-    tesseract_path = r"C:\Program Files\Tesseract-OCR\tesseract.exe"
-    if os.path.exists(tesseract_path):
-        pytesseract.pytesseract.tesseract_cmd = tesseract_path
-
+    from PIL import ImageGrab
+    import numpy as np
+    
     log.info(f"Searching visually (OCR) for text: '{text}'")
     deadline = time.time() + timeout
     text_lower = text.lower()
 
     while time.time() < deadline:
+        win = gw.getActiveWindow()
+        if not win:
+            return "Error: No active window found for OCR."
+        
+        bbox = (win.left, win.top, win.right, win.bottom)
+        img = ImageGrab.grab(bbox)
+        
+    # Initialize EasyOCR once per function call, outside the loop
+    reader = None
+    use_gpu = False
+    try:
+        import easyocr
+        import warnings
+        warnings.filterwarnings("ignore", category=UserWarning, module="torch")
+        from core.settings import SettingsManager
+        v_device = SettingsManager.get("vision_device", "auto")
+        if v_device == "cuda":
+            use_gpu = True
+        elif v_device == "auto":
+            import torch
+            use_gpu = torch.cuda.is_available()
+        reader = easyocr.Reader(['en'], gpu=use_gpu, verbose=False)
+    except Exception as e:
+        log.warning(f"EasyOCR init failed: {e}")
+
+    while time.time() < deadline:
+        win = gw.getActiveWindow()
+        if not win:
+            return "Error: No active window found for OCR."
+        
+        bbox = (win.left, win.top, win.right, win.bottom)
+        img = ImageGrab.grab(bbox)
+        
         try:
-            win = gw.getActiveWindow()
-            if not win:
-                return "Error: No active window found for OCR."
-            
-            bbox = (win.left, win.top, win.right, win.bottom)
-            img = ImageGrab.grab(bbox)
-            data = pytesseract.image_to_data(img, output_type=pytesseract.Output.DICT)
-            
-            for i in range(len(data['text'])):
-                word = data['text'][i].strip().lower()
-                # Partial or exact match
-                if text_lower in word and len(word) > 2:
-                    x = win.left + data['left'][i] + (data['width'][i] // 2)
-                    y = win.top + data['top'][i] + (data['height'][i] // 2)
-                    
-                    if 0 <= y <= win.height and 0 <= x <= win.width:
-                        log.info(f"Found visual text '{word}' at ({x}, {y}). Clicking.")
+            if reader:
+                img_np = np.array(img)
+                results = reader.readtext(img_np)
+                
+                # First pass: try exact or substring match
+                for (bbox_cords, word, prob) in results:
+                    word_lower = word.lower()
+                    # Check if target is in detected word, OR if a significant chunk of target matches detected word
+                    if text_lower in word_lower or (len(text_lower) >= 4 and text_lower[:4] in word_lower and text_lower[-4:] in word_lower):
+                        x_center = int((bbox_cords[0][0] + bbox_cords[1][0]) / 2)
+                        y_center = int((bbox_cords[0][1] + bbox_cords[2][1]) / 2)
+                        
+                        x = win.left + x_center
+                        y = win.top + y_center
+                        
+                        log.info(f"[EasyOCR] Found '{word}' at ({x}, {y}). Clicking.")
                         pyautogui.click(x=x, y=y)
                         return f"Clicked visual text '{word}' at ({x}, {y})."
                         
+                # Second pass: What if EasyOCR split "Gopal ji yadav" into "Gopal", "ji", "yadav"?
+                # Check for partial matches that are very close
+                parts = text_lower.split()
+                if len(parts) > 1:
+                    for (bbox_cords, word, prob) in results:
+                        word_lower = word.lower()
+                        # If the longest word in the target is in the detected text, click it.
+                        longest_part = max(parts, key=len)
+                        if len(longest_part) > 4 and longest_part in word_lower:
+                            x_center = int((bbox_cords[0][0] + bbox_cords[1][0]) / 2)
+                            y_center = int((bbox_cords[0][1] + bbox_cords[2][1]) / 2)
+                            
+                            x = win.left + x_center
+                            y = win.top + y_center
+                            
+                            log.info(f"[EasyOCR] Found partial match '{word}' for '{text}'. Clicking.")
+                            pyautogui.click(x=x, y=y)
+                            return f"Clicked visual text '{word}' at ({x}, {y})."
+
+            else:
+                # FALLBACK TO TESSERACT
+            import pytesseract
+            tesseract_path = r"C:\Program Files\Tesseract-OCR\tesseract.exe"
+            if os.path.exists(tesseract_path):
+                pytesseract.pytesseract.tesseract_cmd = tesseract_path
+
+            data = pytesseract.image_to_data(img, output_type=pytesseract.Output.DICT)
+            for i in range(len(data['text'])):
+                word = data['text'][i].strip().lower()
+                if text_lower in word and len(word) > 2:
+                    x = win.left + data['left'][i] + (data['width'][i] // 2)
+                    y = win.top + data['top'][i] + (data['height'][i] // 2)
+                    log.info(f"[Tesseract] Found '{word}' at ({x}, {y}). Clicking.")
+                    pyautogui.click(x=x, y=y)
+                    return f"Clicked visual text '{word}' at ({x}, {y})."
+                    
         except Exception as e:
             log.warning(f"click_text OCR error: {e}")
             
