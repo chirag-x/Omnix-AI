@@ -18,6 +18,17 @@ def click(x: int, y: int) -> str:
     return f"Clicked at ({x}, {y})"
 
 
+def right_click(x: int, y: int) -> str:
+    """
+    Right-click at absolute screen coordinates.
+    Use this to open context menus (e.g., right-click a WhatsApp message bubble
+    to get Delete, Reply, etc.). More stable than left-click hovering.
+    """
+    log.info(f"Right-clicking at ({x}, {y})")
+    pyautogui.rightClick(x=int(x), y=int(y))
+    return f"Right-clicked at ({x}, {y})"
+
+
 def scroll(clicks: int) -> str:
     """Scroll the mouse wheel by a number of clicks (negative = down, positive = up)."""
     log.info(f"Scrolling by {clicks} clicks")
@@ -225,20 +236,23 @@ def click_text(text: str, timeout: float = 5.0) -> str:
 
             else:
                 # FALLBACK TO TESSERACT
-            import pytesseract
-            tesseract_path = r"C:\Program Files\Tesseract-OCR\tesseract.exe"
-            if os.path.exists(tesseract_path):
-                pytesseract.pytesseract.tesseract_cmd = tesseract_path
+                try:
+                    import pytesseract
+                    tesseract_path = r"C:\Program Files\Tesseract-OCR\tesseract.exe"
+                    if os.path.exists(tesseract_path):
+                        pytesseract.pytesseract.tesseract_cmd = tesseract_path
 
-            data = pytesseract.image_to_data(img, output_type=pytesseract.Output.DICT)
-            for i in range(len(data['text'])):
-                word = data['text'][i].strip().lower()
-                if text_lower in word and len(word) > 2:
-                    x = win.left + data['left'][i] + (data['width'][i] // 2)
-                    y = win.top + data['top'][i] + (data['height'][i] // 2)
-                    log.info(f"[Tesseract] Found '{word}' at ({x}, {y}). Clicking.")
-                    pyautogui.click(x=x, y=y)
-                    return f"Clicked visual text '{word}' at ({x}, {y})."
+                    data = pytesseract.image_to_data(img, output_type=pytesseract.Output.DICT)
+                    for i in range(len(data['text'])):
+                        word = data['text'][i].strip().lower()
+                        if text_lower in word and len(word) > 2:
+                            x = win.left + data['left'][i] + (data['width'][i] // 2)
+                            y = win.top + data['top'][i] + (data['height'][i] // 2)
+                            log.info(f"[Tesseract] Found '{word}' at ({x}, {y}). Clicking.")
+                            pyautogui.click(x=x, y=y)
+                            return f"Clicked visual text '{word}' at ({x}, {y})."
+                except Exception as te:
+                    log.warning(f"Tesseract fallback error: {te}")
                     
         except Exception as e:
             log.warning(f"click_text OCR error: {e}")
@@ -246,3 +260,95 @@ def click_text(text: str, timeout: float = 5.0) -> str:
         time.sleep(0.5)
         
     return f"Error: Could not find the text '{text}' visually on the screen after {timeout:.0f}s."
+
+
+def click_visual(description: str) -> str:
+    """
+    Find and click any UI element, icon, or text using Cloud LLM Vision (e.g. Gemini).
+    This bypasses local OCR and sends a screenshot to the LLM to get exact coordinates.
+    Use this when local click_text fails, or when clicking non-text icons (e.g., "gear icon").
+    """
+    import base64
+    import io
+    import time
+    from PIL import ImageGrab
+    from brain.llm_provider import get_active_model, _make_gemini_request
+    from core.settings import SettingsManager
+    
+    log.info(f"Visual Click Request: '{description}'")
+    
+    # 1. Check if Cloud Vision is enabled in settings
+    vision_mode = SettingsManager.get("vision_engine_type", "Cloud (LLM Vision)")
+    if "Local" in vision_mode:
+        log.info("Cloud vision is disabled, falling back to click_text")
+        return click_text(description)
+        
+    win = gw.getActiveWindow()
+    if not win:
+        return "Error: No active window to look at."
+        
+    # 2. Take screenshot of active window
+    bbox = (win.left, win.top, win.right, win.bottom)
+    img = ImageGrab.grab(bbox)
+    width, height = img.size
+    
+    buffered = io.BytesIO()
+    img.save(buffered, format="JPEG", quality=85)
+    img_b64 = base64.b64encode(buffered.getvalue()).decode("utf-8")
+    
+    # 3. Ask Gemini for coordinates
+    prompt = (
+        f"You are a robotic vision system. Locate the following UI element on the screen: '{description}'.\n"
+        f"The image size is {width}x{height} pixels.\n"
+        "Reply ONLY with the exact X and Y coordinates of the center of that element in this exact format: X,Y\n"
+        "If you absolutely cannot find it, reply with: NOT_FOUND"
+    )
+    
+    try:
+        from brain.llm_provider import FAST_MODEL, ACTIVE_URL, ACTIVE_KEY
+        
+        # We can construct the OpenAI compat payload for Gemini
+        payload = {
+            "model": FAST_MODEL or "gemini-3.5-flash",
+            "messages": [
+                {
+                    "role": "user",
+                    "content": [
+                        {"type": "text", "text": prompt},
+                        {"type": "image_url", "image_url": {"url": f"data:image/jpeg;base64,{img_b64}"}}
+                    ]
+                }
+            ],
+            "max_tokens": 15,
+            "temperature": 0.0
+        }
+        
+        import requests
+        headers = {"Authorization": f"Bearer {ACTIVE_KEY}", "Content-Type": "application/json"}
+        # Ensure we have the base chat completion endpoint if ACTIVE_URL doesn't end in chat/completions
+        base = ACTIVE_URL.rstrip('/') if ACTIVE_URL else "https://generativelanguage.googleapis.com/v1beta/openai"
+        url = f"{base}/chat/completions"
+        
+        log.info(f"Querying Cloud Vision ({FAST_MODEL}) for coordinates...")
+        resp = requests.post(url, headers=headers, json=payload, timeout=15)
+        resp.raise_for_status()
+        
+        result_text = resp.json()["choices"][0]["message"]["content"].strip()
+        log.info(f"Cloud Vision responded: {result_text}")
+        
+        if "NOT_FOUND" in result_text or "," not in result_text:
+            return f"Error: Cloud Vision could not locate '{description}'."
+            
+        parts = result_text.replace(" ", "").split(",")
+        local_x = int(float(parts[0]))
+        local_y = int(float(parts[1]))
+        
+        abs_x = win.left + local_x
+        abs_y = win.top + local_y
+        
+        pyautogui.click(x=abs_x, y=abs_y)
+        return f"Cloud Vision clicked '{description}' at ({abs_x}, {abs_y})"
+        
+    except Exception as e:
+        log.error(f"Cloud Vision error: {e}")
+        return f"Error using Cloud Vision: {e}. Try click_text instead."

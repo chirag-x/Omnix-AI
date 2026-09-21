@@ -513,9 +513,23 @@ def build_settings_page(page: ft.Page, on_back):
         elif current_tab == "Vision":
             content_area.controls.extend([
                 section_header("Vision Engine (OCR & Image Processing)"),
-                ft.Text("Select the hardware device to process visual operations (EasyOCR).", size=14, color=c_sub),
+                ft.Text("Select which vision model to use for finding UI elements on screen.", size=14, color=c_sub),
+                bind("vision_engine_type", ft.Dropdown(
+                    label="Vision Provider",
+                    options=[
+                        ft.dropdown.Option("Cloud (LLM Vision)", "Cloud AI (Gemini Vision) — Recommended"),
+                        ft.dropdown.Option("Local (EasyOCR)", "Local OCR (EasyOCR)")
+                    ],
+                    bgcolor=c_surface, color=c_text, border_color=c_border, focused_border_color=accent, border_radius=8
+                ), "Cloud (LLM Vision)"),
+                ft.Text("Cloud AI can see icons, shapes, and complex UI. Local OCR only reads plain text.", size=11, color=c_sub, italic=True),
+                
+                ft.Divider(color=c_border),
+                
+                section_header("Local OCR Hardware"),
+                ft.Text("If using Local OCR, select the hardware device to process it.", size=14, color=c_sub),
                 bind("vision_device", ft.Dropdown(
-                    label="Compute Device",
+                    label="Local Compute Device",
                     options=[
                         ft.dropdown.Option("auto", "Auto (GPU Preferred)"),
                         ft.dropdown.Option("cuda", "CUDA (GPU Only)"),
