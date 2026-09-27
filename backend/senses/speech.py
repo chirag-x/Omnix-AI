@@ -7,6 +7,9 @@ import os
 import soundfile as sf
 import edge_tts
 from utils.logger import log
+from backend.embodiment.events import event_bus
+from backend.embodiment.models import OmnixEvent, EventTypes
+
 from core.settings import SettingsManager
 
 # ─── Kokoro model paths ───────────────────────────────────────────────────────
@@ -174,11 +177,16 @@ async def generate_audio(text: str, voice_pref: str = None, emotion: str = "neut
     """
     if not text or not text.strip():
         return ""
+    event_bus.publish(OmnixEvent(event_type=EventTypes.TTS_GENERATION_STARTED))
 
     audio_mode = SettingsManager.get("audio_mode", "Natural")
 
     if audio_mode == "Natural":
-        return await asyncio.to_thread(_generate_kokoro_sync, text, emotion)
+        res = await asyncio.to_thread(_generate_kokoro_sync, text, emotion)
+        event_bus.publish(OmnixEvent(event_type=EventTypes.TTS_GENERATION_COMPLETED))
+        return res
     else:
         voice = voice_pref or SettingsManager.get("voice_selection", "en-US-ChristopherNeural")
-        return await _generate_edge_tts(text, voice)
+        res = await _generate_edge_tts(text, voice)
+        event_bus.publish(OmnixEvent(event_type=EventTypes.TTS_GENERATION_COMPLETED))
+        return res

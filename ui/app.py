@@ -36,6 +36,13 @@ from tts_player import play_audio_b64
 from settings_page import build_settings_page
 from tray_manager import TrayManager
 from utils.logger import log
+from avatar import start_avatar_system, stop_avatar_system
+import sys
+import os
+sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), '..')))
+from backend.embodiment.events import event_bus
+from backend.embodiment.models import OmnixEvent, EventTypes
+from backend.embodiment.ui_adapter import FletUIAdapter
 
 # ── Emotion → orb colour map ──────────────────────────────────────────────────
 EMOTION_COLORS = {
@@ -108,6 +115,7 @@ class OmnixApp:
 
         self._setup_page()
         self._build_ui()
+        self.ui_adapter = FletUIAdapter(self)
 
         # Start background services after first frame renders
         threading.Thread(target=self._start_services, daemon=True).start()
@@ -239,6 +247,7 @@ class OmnixApp:
         self.page.update()
 
         # Start in LOADING state
+        event_bus.publish(OmnixEvent(event_type=EventTypes.OMNIX_BOOTING))
         self._set_orb_state(OrbState.LOADING)
 
     # ── Top bar ───────────────────────────────────────────────────────────────
@@ -779,6 +788,8 @@ class OmnixApp:
         if self.is_awake:
             return
         self.is_awake = True
+        event_bus.publish(OmnixEvent(event_type=EventTypes.WAKE_STARTED))
+        event_bus.publish(OmnixEvent(event_type=EventTypes.WOKE))
         if self.wake_engine:
             self.wake_engine.set_awake(True)
         self._set_awake_ui(True)
@@ -798,6 +809,8 @@ class OmnixApp:
     def _on_sleep(self):
         if not self.is_awake:
             return
+        event_bus.publish(OmnixEvent(event_type=EventTypes.SLEEP_STARTED))
+        event_bus.publish(OmnixEvent(event_type=EventTypes.SLEPT))
         self.is_awake = False
         if self.wake_engine:
             self.wake_engine.set_awake(False)
@@ -844,6 +857,7 @@ class OmnixApp:
     # ══════════════════════════════════════════════════════════════════════════
 
     def _on_voice_speech_start(self):
+        event_bus.publish(OmnixEvent(event_type=EventTypes.USER_SPEECH_STARTED))
         """Called when CommandListener detects audio arriving (before transcription)."""
         self._set_orb_state(OrbState.LISTENING)
         self.mic_status.value = "🎙 Capturing…"
@@ -853,6 +867,7 @@ class OmnixApp:
             pass
 
     def _on_voice_speech_end(self):
+        event_bus.publish(OmnixEvent(event_type=EventTypes.USER_SPEECH_ENDED))
         """Called when CommandListener finishes transcription with no usable text."""
         if self.is_awake and not self.is_processing:
             self._set_orb_state(OrbState.AWAKE_IDLE)
@@ -863,6 +878,7 @@ class OmnixApp:
                 pass
 
     def _on_voice_command(self, text: str):
+        event_bus.publish(OmnixEvent(event_type=EventTypes.USER_SPEECH_RECOGNIZED, payload={"text": text}))
         """Called when CommandListener has a transcribed command ready."""
         self._add_user_bubble(text)
         asyncio.run_coroutine_threadsafe(self._run_command(text), self._loop)
@@ -981,6 +997,7 @@ class OmnixApp:
         self._start_wake_engine()
 
         # Step 4: Ready
+        event_bus.publish(OmnixEvent(event_type=EventTypes.OMNIX_READY))
         self._set_orb_state(OrbState.SLEEPING)
         self._add_system_message("✅  Omnix is ready — say 'Hey Omnix' to begin", "#4CAF5099")
         self.mic_status.value = "🎙 Idle"

@@ -11,6 +11,8 @@ from skills.registry import execute_skill
 from memory.short_term import ShortTermMemory
 from senses.speech import generate_audio
 from utils.logger import log
+from backend.embodiment.events import event_bus
+from backend.embodiment.models import OmnixEvent, EventTypes
 
 memory = ShortTermMemory()
 _command_lock = threading.Lock()
@@ -105,8 +107,11 @@ async def process_command(user_text: str, on_response):
         return
     try:
         reset()
+        event_bus.publish(OmnixEvent(event_type=EventTypes.TASK_STARTED, payload={"command": user_text}))
         await _process_command(user_text, on_response)
+        event_bus.publish(OmnixEvent(event_type=EventTypes.TASK_SUCCEEDED, payload={"command": user_text}))
     except TaskCancelled:
+        event_bus.publish(OmnixEvent(event_type=EventTypes.TASK_INTERRUPTED))
         log.info("Task stopped by user; remaining actions discarded.")
         if on_response:
             on_response("Task stopped by user.", "neutral", "")
@@ -145,6 +150,7 @@ async def _process_command(user_text: str, on_response):
 
         memory.add_message("user", current_input)
 
+        event_bus.publish(OmnixEvent(event_type=EventTypes.THINKING_STARTED))
         # 1. Think
         prompt = get_system_prompt()
         response = await asyncio.to_thread(generate_response, prompt, list(memory.get_history()), expert_override=use_expert)
@@ -154,6 +160,9 @@ async def _process_command(user_text: str, on_response):
             continue
         log.info(f"Brain reasoning: {response.get('thought')}")
         log.info(f"Brain Raw JSON Output: {json.dumps(response, indent=2)}")
+        event_bus.publish(OmnixEvent(event_type=EventTypes.THINKING_ENDED))
+        emotion = response.get("emotion", "neutral")
+        event_bus.publish(OmnixEvent(event_type=EventTypes.EMOTION_CHANGED, payload={"emotion": emotion}))
         memory.add_message("assistant", json.dumps(response))
 
         # Normalize the plan before speaking. This lets the runtime prevent a

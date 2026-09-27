@@ -25,6 +25,15 @@ DEFAULTS = {
     "tts_voice": "en-US-ChristopherNeural",
     "vision_min_ocr_confidence": 0.50,
     "vision_cloud_confidence": 0.86,
+    "avatar_enabled": True,
+    "avatar_always_on_top": True,
+    "avatar_click_through": False,
+    "avatar_scale": 1.0,
+    "avatar_position_x": 0,
+    "avatar_position_y": 0,
+    "avatar_model_path": "",
+    "avatar_renderer_port": 21212,
+
 }
 
 class SettingsManager:

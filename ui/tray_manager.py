@@ -110,6 +110,12 @@ class TrayManager:
 
     # ─── Internal ──────────────────────────────────────────────────────────────
 
+    def _on_restart_avatar(self):
+        from avatar import avatar_process_manager
+        avatar_process_manager.stop()
+        import time; time.sleep(0.5)
+        avatar_process_manager.start()
+
     def _run(self):
         """Blocking tray icon run — called in background thread."""
         try:
@@ -117,6 +123,8 @@ class TrayManager:
                 pystray.MenuItem("Open Omnix",    self._safe(self._on_open),  default=True),
                 pystray.MenuItem("Wake Up",       self._safe(self._on_wake)),
                 pystray.MenuItem("Sleep",         self._safe(self._on_sleep)),
+                pystray.Menu.SEPARATOR,
+                pystray.MenuItem("Restart Avatar", self._safe(self._on_restart_avatar)),
                 pystray.Menu.SEPARATOR,
                 pystray.MenuItem("Quit Omnix",    self._safe(self._on_quit)),
             )

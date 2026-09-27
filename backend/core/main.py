@@ -25,6 +25,8 @@ def ensure_omniroute_running():
     else:
         log.info("OmniRoute is already running. Brain connection is healthy.")
 
+# DEPRECATED: This WebSocket server is a stale/legacy path. The canonical UI is Flet (ui/main.py) with the new Embodiment Event Architecture.
+# This remains here for backwards compatibility.
 class OmnixServer:
     def __init__(self):
         Config.ensure_dirs()
@@ -33,6 +35,12 @@ class OmnixServer:
         self.port = Config.WS_PORT
         self.active_websocket = None
         log.info(f"Initialized Omnix 2.0 Core on ws://{self.host}:{self.port}")
+
+def make_on_response(websocket):
+    def on_response(text, emotion, audio_b64):
+        # Deprecated adapter for websocket clients
+        asyncio.create_task(websocket.send(json.dumps({"type": "response", "text": text, "emotion": emotion, "audio": audio_b64})))
+    return on_response
 
     async def handle_connection(self, websocket):
         log.info("Frontend connected to Omnix 2.0")
@@ -47,7 +55,7 @@ class OmnixServer:
                         if msg_type == "text":
                             command = data.get("command", "")
                             log.info(f"Received Text Command: {command}")
-                            await process_command(command, websocket)
+                            await process_command(command, make_on_response(websocket))
                             
                         elif msg_type == "audio":
                             import base64
@@ -57,18 +65,18 @@ class OmnixServer:
                                 audio_bytes = base64.b64decode(audio_b64)
                                 text = await asyncio.to_thread(transcribe_audio, audio_bytes)
                                 if text:
-                                    await process_command(text, websocket)
+                                    await process_command(text, make_on_response(websocket))
                         else:
                             log.warning(f"Unknown message type: {msg_type}")
                     except json.JSONDecodeError:
                         # Fallback for plain text
                         log.info(f"Received raw text: {message}")
-                        await process_command(message, websocket)
+                        await process_command(message, make_on_response(websocket))
                 else:
                     log.info(f"Received raw binary message.")
                     text = await asyncio.to_thread(transcribe_audio, message)
                     if text:
-                        await process_command(text, websocket)
+                        await process_command(text, make_on_response(websocket))
                     
         except websockets.exceptions.ConnectionClosed:
             log.info("Frontend disconnected.")

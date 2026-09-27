@@ -3,6 +3,12 @@ import io
 import threading
 import pygame
 from utils.logger import log
+import sys
+import os
+sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), '..')))
+from backend.embodiment.events import event_bus
+from backend.embodiment.models import OmnixEvent, EventTypes
+
 
 from core.settings import SettingsManager
 from core.task_control import register_stop_callback
@@ -55,6 +61,7 @@ def stop_audio():
         if pygame.mixer.get_init():
             pygame.mixer.music.stop()
         LAST_TTS_END_TIME = time.time()
+        event_bus.publish(OmnixEvent(event_type=EventTypes.TTS_PLAYBACK_FINISHED))
 
 
 register_stop_callback(stop_audio)
@@ -75,6 +82,7 @@ def _play(audio_io: io.BytesIO, generation: int):
                 fmt = "wav" if header == b"RIFF" else "mp3"
                 pygame.mixer.music.load(audio_io, fmt)
                 pygame.mixer.music.play()
+                event_bus.publish(OmnixEvent(event_type=EventTypes.TTS_PLAYBACK_STARTED))
             while is_playing():
                 with _state_lock:
                     if generation != _generation:
@@ -84,6 +92,7 @@ def _play(audio_io: io.BytesIO, generation: int):
             log.error(f"Pygame playback error: {e}")
         finally:
             LAST_TTS_END_TIME = time.time()
+            event_bus.publish(OmnixEvent(event_type=EventTypes.TTS_PLAYBACK_FINISHED))
 
 def is_playing() -> bool:
     return bool(pygame.mixer.get_init()) and pygame.mixer.music.get_busy()
