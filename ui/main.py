@@ -1,3 +1,4 @@
+# DEPRECATED: Use the root main.py instead. (python main.py)
 import sys
 import os
 

@@ -108,8 +108,11 @@ async def process_command(user_text: str, on_response):
     try:
         reset()
         event_bus.publish(OmnixEvent(event_type=EventTypes.TASK_STARTED, payload={"command": user_text}))
-        await _process_command(user_text, on_response)
-        event_bus.publish(OmnixEvent(event_type=EventTypes.TASK_SUCCEEDED, payload={"command": user_text}))
+        success = await _process_command(user_text, on_response)
+        if success:
+            event_bus.publish(OmnixEvent(event_type=EventTypes.TASK_SUCCEEDED, payload={"command": user_text}))
+        else:
+            event_bus.publish(OmnixEvent(event_type=EventTypes.TASK_FAILED, payload={"command": user_text}))
     except TaskCancelled:
         event_bus.publish(OmnixEvent(event_type=EventTypes.TASK_INTERRUPTED))
         log.info("Task stopped by user; remaining actions discarded.")
@@ -146,7 +149,7 @@ async def _process_command(user_text: str, on_response):
             check_cancelled()
             if on_response:
                 on_response("I reached my action limit without completing the task. Please try again.", "confused", audio_b64)
-            break
+            return False
 
         memory.add_message("user", current_input)
 
@@ -313,7 +316,7 @@ async def _process_command(user_text: str, on_response):
             if memory.total_steps() >= MAX_ACTIONS:
                 if on_response:
                     on_response("I reached my action limit without completing the task. Please try again.", "confused", "")
-                return
+                return False
 
             literal = _extract_literal_content(original_goal, skill)
             if literal is not None and (
@@ -352,8 +355,7 @@ async def _process_command(user_text: str, on_response):
                 check_cancelled()
                 if on_response:
                     on_response(text2, "confused", audio_b64)
-                is_done = True
-                break
+                return False
 
             obs = await asyncio.to_thread(execute_skill, skill, args)
             check_cancelled()
@@ -400,4 +402,6 @@ async def _process_command(user_text: str, on_response):
     else:
         if on_response:
             on_response("I couldn't complete the task within my reasoning limit. Please try a smaller request.", "confused", "")
+        return False
+    return True
 

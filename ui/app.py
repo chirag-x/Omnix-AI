@@ -30,13 +30,9 @@ from core.config import Config
 from core.settings import SettingsManager
 from brain.orchestrator import process_command, trigger_abort
 from senses.hearing import transcribe_audio
-from wake_engine import WakeEngine
-from command_listener import CommandListener
 from tts_player import play_audio_b64
 from settings_page import build_settings_page
-from tray_manager import TrayManager
 from utils.logger import log
-from avatar import start_avatar_system, stop_avatar_system
 import sys
 import os
 sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), '..')))
@@ -109,9 +105,6 @@ class OmnixApp:
         self._orb_state = OrbState.SLEEPING
 
         # Wake / command engines (initialised after UI is up)
-        self.wake_engine: WakeEngine | None = None
-        self.command_listener: CommandListener | None = None
-        self.tray: TrayManager | None = None
 
         self._setup_page()
         self._build_ui()
@@ -170,7 +163,8 @@ class OmnixApp:
     def _on_window_event(self, e: ft.WindowEvent):
         if e.type == ft.WindowEventType.CLOSE:
             # Close the app completely
-            self._quit_app()
+            self.page.window.visible = False
+            self.page.update()
 
     def _on_keyboard(self, e: ft.KeyboardEvent):
         if e.key == "Escape":
@@ -784,49 +778,6 @@ class OmnixApp:
     #  WAKE / SLEEP
     # ══════════════════════════════════════════════════════════════════════════
 
-    def _on_wake(self):
-        if self.is_awake:
-            return
-        self.is_awake = True
-        event_bus.publish(OmnixEvent(event_type=EventTypes.WAKE_STARTED))
-        event_bus.publish(OmnixEvent(event_type=EventTypes.WOKE))
-        if self.wake_engine:
-            self.wake_engine.set_awake(True)
-        self._set_awake_ui(True)
-
-        # Start hands-free listener
-        if self.command_listener:
-            self.command_listener.start_listening()
-
-        if self.tray:
-            self.tray.update_state("awake")
-
-        asyncio.run_coroutine_threadsafe(
-            self._speak_phrase("Hey! I'm awake and ready. What would you like me to do?"),
-            self._loop,
-        )
-
-    def _on_sleep(self):
-        if not self.is_awake:
-            return
-        event_bus.publish(OmnixEvent(event_type=EventTypes.SLEEP_STARTED))
-        event_bus.publish(OmnixEvent(event_type=EventTypes.SLEPT))
-        self.is_awake = False
-        if self.wake_engine:
-            self.wake_engine.set_awake(False)
-        if self.command_listener:
-            self.command_listener.stop_listening()
-
-        self._set_awake_ui(False)
-
-        if self.tray:
-            self.tray.update_state("sleeping")
-
-        asyncio.run_coroutine_threadsafe(
-            self._speak_phrase("Going to sleep. Say Hey Omnix to wake me up."),
-            self._loop,
-        )
-
     def _set_awake_ui(self, awake: bool):
         if awake:
             self.wake_badge_text.value = "🟢  Awake"
@@ -853,41 +804,6 @@ class OmnixApp:
             pass
 
     # ══════════════════════════════════════════════════════════════════════════
-    #  COMMAND LISTENER CALLBACKS
-    # ══════════════════════════════════════════════════════════════════════════
-
-    def _on_voice_speech_start(self):
-        event_bus.publish(OmnixEvent(event_type=EventTypes.USER_SPEECH_STARTED))
-        """Called when CommandListener detects audio arriving (before transcription)."""
-        self._set_orb_state(OrbState.LISTENING)
-        self.mic_status.value = "🎙 Capturing…"
-        try:
-            self.page.update()
-        except Exception:
-            pass
-
-    def _on_voice_speech_end(self):
-        event_bus.publish(OmnixEvent(event_type=EventTypes.USER_SPEECH_ENDED))
-        """Called when CommandListener finishes transcription with no usable text."""
-        if self.is_awake and not self.is_processing:
-            self._set_orb_state(OrbState.AWAKE_IDLE)
-            self.mic_status.value = "🎙 Listening"
-            try:
-                self.page.update()
-            except Exception:
-                pass
-
-    def _on_voice_command(self, text: str):
-        event_bus.publish(OmnixEvent(event_type=EventTypes.USER_SPEECH_RECOGNIZED, payload={"text": text}))
-        """Called when CommandListener has a transcribed command ready."""
-        self._add_user_bubble(text)
-        asyncio.run_coroutine_threadsafe(self._run_command(text), self._loop)
-
-    def _on_voice_silence(self):
-        """Called by CommandListener after silence timeout — go to sleep."""
-        self._on_sleep()
-
-    # ══════════════════════════════════════════════════════════════════════════
     #  TEXT INPUT
     # ══════════════════════════════════════════════════════════════════════════
 
@@ -907,41 +823,26 @@ class OmnixApp:
         if self.is_processing:
             self._add_system_message("A task is already running. Stop it or wait before starting another.")
             return
-        self.is_processing = True
-        if self.command_listener:
-            self.command_listener.set_processing(True)
-
-        # Show thinking state
+        
         self._set_orb_state(OrbState.THINKING)
         self.stop_btn.visible = True
-        if self.tray:
-            self.tray.update_state("thinking")
         try:
             self.page.update()
-        except Exception:
-            pass
+        except: pass
 
+        # Emit event for unified entry point
+        from backend.embodiment.events import event_bus
+        from backend.embodiment.models import OmnixEvent, EventTypes
+        
+        # We simulate VoiceService handling it by emitting the same event
+        event_bus.publish(OmnixEvent(event_type=EventTypes.USER_SPEECH_RECOGNIZED, payload={"text": text}))
+        
+        # We don't call process_command directly here anymore! The Runtime/VoiceService will pick it up.
+        
+        self.stop_btn.visible = False
         try:
-            await process_command(text, self._on_response)
-        except Exception as e:
-            import traceback
-            log.error(f"process_command crashed: {e}\n{traceback.format_exc()}")
-        finally:
-            self.is_processing = False
-            if self.command_listener:
-                self.command_listener.set_processing(False)
-
-            # Back to idle if still awake
-            if self.is_awake:
-                self._set_orb_state(OrbState.AWAKE_IDLE)
-                if self.tray:
-                    self.tray.update_state("awake")
-
-            self.stop_btn.visible = False
-            try:
-                self.page.update()
-            except Exception:
-                pass
+            self.page.update()
+        except: pass
 
     # ══════════════════════════════════════════════════════════════════════════
     #  RESPONSE HANDLER
@@ -954,8 +855,6 @@ class OmnixApp:
             self.page.update()
         except Exception:
             pass
-        if audio_b64:
-            play_audio_b64(audio_b64)
 
     # ══════════════════════════════════════════════════════════════════════════
     #  TTS HELPER
@@ -971,10 +870,9 @@ class OmnixApp:
     # ══════════════════════════════════════════════════════════════════════════
 
     def _start_services(self):
-        """Runs in a background thread — keeps UI responsive during init."""
-
+        """Runs in a background thread to prepare UI elements."""
+        self._loading_step("⏳  Connecting to Omnix Runtime…")
         # Step 1: Check OmniRoute backend
-        self._loading_step("🔌  Checking AI backend connection…")
         self._check_omniroute()
 
         # Step 2: Test / warm up models
@@ -984,6 +882,7 @@ class OmnixApp:
             count = initialize_models()
             self.model_status.value = f"⚡ {count} models online" if count else "⚡ No models"
         except Exception as e:
+            from utils.logger import log
             log.warning(f"Model init error: {e}")
             self.model_status.value = "⚡ Model check failed"
 
@@ -992,57 +891,12 @@ class OmnixApp:
         except Exception:
             pass
 
-        # Step 3: Start wake engine (loads tiny Whisper + calibrates mic)
-        self._loading_step("🧠  Loading wake-word model…")
-        self._start_wake_engine()
-
-        # Step 4: Ready
-        event_bus.publish(OmnixEvent(event_type=EventTypes.OMNIX_READY))
-        self._set_orb_state(OrbState.SLEEPING)
-        self._add_system_message("✅  Omnix is ready — say 'Hey Omnix' to begin", "#4CAF5099")
-        self.mic_status.value = "🎙 Idle"
-        try:
-            self.page.update()
-        except Exception:
-            pass
-
-        # Step 5: System tray
-        self._start_tray()
-
     def _loading_step(self, message: str):
         self._add_system_message(message, "#556688")
         try:
             self.page.update()
         except Exception:
             pass
-
-    def _start_wake_engine(self):
-        self.wake_engine = WakeEngine(on_wake_detected=self._on_wake)
-        self.wake_engine.start()
-
-        # Wait until the WakeEngine has loaded its model (poll longer for first-time downloads)
-        import time
-        for _ in range(600):  # up to 300 seconds for initial download
-            if self.wake_engine.model is not None:
-                break
-            time.sleep(0.5)
-
-        # Build independent CommandListener
-        self.command_listener = CommandListener(
-            on_command        = self._on_voice_command,
-            on_silence        = self._on_voice_silence,
-            on_speech_start   = self._on_voice_speech_start,
-            on_speech_end     = self._on_voice_speech_end,
-        )
-
-    def _start_tray(self):
-        self.tray = TrayManager(
-            on_wake  = self._on_wake,
-            on_sleep = self._on_sleep,
-            on_open  = self._restore_window,
-            on_quit  = self._quit_app,
-        )
-        self.tray.start()
 
     # ── OmniRoute health check ─────────────────────────────────────────────
 
