@@ -55,7 +55,7 @@ def drag(from_x: int, from_y: int, to_x: int, to_y: int, duration: float = 0.4) 
     Returns:
         Success message.
     """
-    log.info(f"Dragging ({from_x},{from_y}) → ({to_x},{to_y})")
+    log.info(f"Dragging ({from_x},{from_y}) -> ({to_x},{to_y})")
     try:
         import pyautogui
         pyautogui.moveTo(int(from_x), int(from_y), duration=0.15)
@@ -72,107 +72,53 @@ def drag(from_x: int, from_y: int, to_x: int, to_y: int, duration: float = 0.4) 
 # VOLUME
 # ──────────────────────────────────────────────────────────────────────────────
 
+def _native_volume(level=None):
+    """Read or set Windows volume and return independently read-back state."""
+    import json
+    from pathlib import Path
+    command = [
+        "powershell.exe", "-NoProfile", "-NonInteractive",
+        "-File", str(Path(__file__).with_name("native_audio.ps1")),
+    ]
+    if level is not None:
+        command.extend(["-Level", str(level)])
+    result = subprocess.run(
+        command, capture_output=True, text=True, timeout=15,
+        creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0),
+    )
+    if result.returncode != 0:
+        raise RuntimeError((result.stderr or result.stdout).strip()[:1000] or
+                           f"Native audio command exited with code {result.returncode}")
+    state = json.loads(result.stdout)
+    if (not isinstance(state, dict) or type(state.get("level")) is not int
+            or not 0 <= state["level"] <= 100 or type(state.get("muted")) is not bool):
+        raise ValueError("Native audio returned invalid volume state")
+    return state
+
+
 def get_volume() -> str:
-    """
-    Get the current system master volume level (0–100).
-
-    Returns:
-        A string like "Current volume: 65" or an error.
-    """
-    log.info("Getting system volume")
+    """Read actual master volume and mute state without optional Python drivers."""
     try:
-        from ctypes import cast, POINTER
-        from comtypes import CLSCTX_ALL
-        from pycaw.pycaw import AudioUtilities, IAudioEndpointVolume
-
-        devices = AudioUtilities.GetSpeakers()
-        interface = devices.Activate(IAudioEndpointVolume._iid_, CLSCTX_ALL, None)
-        volume = cast(interface, POINTER(IAudioEndpointVolume))
-        level = round(volume.GetMasterVolumeLevelScalar() * 100)
-        muted = volume.GetMute()
-        status = f"Current volume: {level}%"
-        if muted:
-            status += " (MUTED)"
-        return status
-    except ImportError:
-        # pycaw not installed, use PowerShell fallback
-        try:
-            result = subprocess.run(
-                ["powershell", "-Command",
-                 "(Get-AudioDevice -Playback).Volume"],
-                capture_output=True, text=True, timeout=5
-            )
-            v = result.stdout.strip()
-            return f"Current volume: {v}%" if v else "Unable to read volume (AudioDeviceCmdlets not installed)"
-        except Exception as e2:
-            return f"Error reading volume: {e2}"
+        state = _native_volume()
+        return f"Current volume: {state['level']}%" + (" (MUTED)" if state["muted"] else "")
     except Exception as e:
         log.error(f"get_volume error: {e}")
         return f"Error getting volume: {e}"
 
 
 def set_volume(level: int) -> str:
-    """
-    Set the system master volume to an exact level from 0 to 100.
-    Use this instead of volumeup/volumedown when the user specifies an exact number.
-
-    Args:
-        level: Integer from 0 (mute) to 100 (max). E.g., set_volume(50) for half volume.
-
-    Returns:
-        Confirmation or error.
-    """
-    level = max(0, min(100, int(level)))
-    log.info(f"Setting volume to {level}%")
+    """Set master volume, then verify the level and mute state reported by Windows."""
     try:
-        # Dependency-free Windows native volume control using embedded C#
-        ps_script = f"""
-Add-Type -TypeDefinition @'
-using System.Runtime.InteropServices;
-[Guid("5CDF2C82-841E-4546-9722-0CF74078229A"), InterfaceType(ComInterfaceType.InterfaceIsIUnknown)]
-interface IAudioEndpointVolume {{
-    int f(); int g(); int h(); int i();
-    int SetMasterVolumeLevelScalar(float fLevel, System.Guid pguidEventContext);
-    int j();
-    int GetMasterVolumeLevelScalar(out float pfLevel);
-    int k(); int l(); int m(); int n();
-    int SetMute(bool bMute, System.Guid pguidEventContext);
-    int GetMute(out bool pbMute);
-}}
-[Guid("D666063F-1587-4E43-81F1-B948E807363F"), InterfaceType(ComInterfaceType.InterfaceIsIUnknown)]
-interface IMMDevice {{
-    int Activate(ref System.Guid id, int clsCtx, int activationParams, out IAudioEndpointVolume aev);
-}}
-[Guid("A95664D2-9614-4F35-A746-DE8DB63617E6"), InterfaceType(ComInterfaceType.InterfaceIsIUnknown)]
-interface IMMDeviceEnumerator {{
-    int GetDefaultAudioEndpoint(int dataFlow, int role, out IMMDevice endpoint);
-}}
-[ComImport, Guid("BCDE0395-E52F-467C-8E3D-C4579291692E")] class MMDeviceEnumeratorComObject {{}}
-public class Audio {{
-    public static void SetVolume(float level, bool mute) {{
-        IMMDeviceEnumerator enumerator = (IMMDeviceEnumerator)(new MMDeviceEnumeratorComObject());
-        IMMDevice dev = null;
-        enumerator.GetDefaultAudioEndpoint(0, 1, out dev);
-        IAudioEndpointVolume vol = null;
-        System.Guid iid = typeof(IAudioEndpointVolume).GUID;
-        dev.Activate(ref iid, 23, 0, out vol);
-        vol.SetMasterVolumeLevelScalar(level, System.Guid.Empty);
-        vol.SetMute(mute, System.Guid.Empty);
-    }}
-}}
-'@
-[Audio]::SetVolume({level / 100.0}, ${'true' if level == 0 else 'false'})
-"""
-        subprocess.run(["powershell", "-Command", ps_script], capture_output=True, timeout=5)
-        return f"Volume set to {level}%"
+        level = max(0, min(100, int(level)))
+        state = _native_volume(level)
+        if abs(state["level"] - level) > 1 or state["muted"] != (level == 0):
+            return (f"Error: Requested volume {level}%, but Windows reports "
+                    f"{state['level']}% (muted={state['muted']}).")
+        return f"Volume set to {state['level']}% (verified)"
     except Exception as e:
         log.error(f"set_volume error: {e}")
-        return f"Error setting volume to {level}%: {e}"
+        return f"Error setting volume: {e}"
 
-
-# ──────────────────────────────────────────────────────────────────────────────
-# SYSTEM INFORMATION
-# ──────────────────────────────────────────────────────────────────────────────
 
 def get_system_info() -> str:
     """

@@ -1,6 +1,7 @@
 import os
 import subprocess
 from utils.logger import log
+from core.known_folders import resolve_user_path
 
 def run_terminal_command(command: str) -> str:
     """Runs a silent terminal command in the background."""
@@ -9,6 +10,8 @@ def run_terminal_command(command: str) -> str:
         # We use a timeout to prevent the agent from getting stuck on an infinite loop command
         result = subprocess.run(command, shell=True, capture_output=True, text=True, timeout=15)
         output = result.stdout + result.stderr
+        if result.returncode != 0:
+            return f"Error: Command exited with code {result.returncode}.\n{output[:3000]}"
         if not output.strip():
             return "Command executed successfully with no output."
         # Truncate output to avoid massive LLM context overload (3000 chars)
@@ -20,7 +23,7 @@ def run_terminal_command(command: str) -> str:
 
 def read_file(file_path: str) -> str:
     """Reads the contents of a local file."""
-    file_path = os.path.expanduser(file_path)
+    file_path = resolve_user_path(file_path)
     log.info(f"Reading file: {file_path}")
     try:
         if not os.path.exists(file_path):
@@ -34,7 +37,7 @@ def read_file(file_path: str) -> str:
 
 def list_directory(directory_path: str) -> str:
     """Lists all files and folders in a given directory."""
-    directory_path = os.path.expanduser(directory_path)
+    directory_path = resolve_user_path(directory_path)
     log.info(f"Listing directory: {directory_path}")
     try:
         if not os.path.exists(directory_path):
@@ -46,7 +49,7 @@ def list_directory(directory_path: str) -> str:
 
 def open_file_or_folder(path: str) -> str:
     """Visually opens a file or folder for the user on their screen."""
-    path = os.path.expanduser(path)
+    path = resolve_user_path(path)
     log.info(f"Opening file/folder for user: {path}")
     try:
         if not os.path.exists(path):
@@ -59,7 +62,7 @@ def open_file_or_folder(path: str) -> str:
 def search_files(directory: str, filename_query: str) -> str:
     """Recursively searches for files/folders matching a query within a directory (Max 10 seconds)."""
     import time
-    directory = os.path.expanduser(directory)
+    directory = resolve_user_path(directory)
     log.info(f"Searching for '{filename_query}' in '{directory}'")
     try:
         if not os.path.exists(directory):

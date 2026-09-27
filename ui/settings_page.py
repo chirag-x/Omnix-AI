@@ -523,6 +523,12 @@ def build_settings_page(page: ft.Page, on_back):
                     bgcolor=c_surface, color=c_text, border_color=c_border, focused_border_color=accent, border_radius=8
                 ), "Cloud (LLM Vision)"),
                 ft.Text("Cloud AI can see icons, shapes, and complex UI. Local OCR only reads plain text.", size=11, color=c_sub, italic=True),
+
+                bind("vision_cloud_confidence", ft.Slider(
+                    min=0.70, max=0.99, divisions=29, label="Cloud confidence {value}",
+                    active_color=accent
+                ), 0.86),
+                ft.Text("Higher confidence reduces wrong clicks. Omnix refuses uncertain or ambiguous targets.", size=11, color=c_sub, italic=True),
                 
                 ft.Divider(color=c_border),
                 
@@ -537,6 +543,10 @@ def build_settings_page(page: ft.Page, on_back):
                     ],
                     bgcolor=c_surface, color=c_text, border_color=c_border, focused_border_color=accent, border_radius=8
                 ), "auto"),
+                bind("vision_min_ocr_confidence", ft.Slider(
+                    min=0.30, max=0.95, divisions=13, label="OCR confidence {value}",
+                    active_color=accent
+                ), 0.50),
                 ft.Text("Note: CUDA (GPU) is much faster but requires an NVIDIA graphics card. If you get 'pin_memory' errors, switch to CPU.", size=11, color=c_sub, italic=True),
             ])
 

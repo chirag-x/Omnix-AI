@@ -39,3 +39,5 @@ backend/models/
 omnix_settings.json
 .env
 /tests/
+/regression_tests/
+*.md

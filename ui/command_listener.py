@@ -56,6 +56,8 @@ class CommandListener:
         self._running = False
         self._is_processing = False  # True while a command task is executing
         self._should_pulse = False
+        self._pending_command = None
+        self._state_lock = threading.Lock()
 
         self._silence_timer: threading.Timer | None = None
         self._stop_listening_func = None
@@ -82,6 +84,8 @@ class CommandListener:
     def stop_listening(self):
         """Stop the background listener and cancel silence timer."""
         self._running = False
+        with self._state_lock:
+            self._pending_command = None
         self._cancel_silence_timer()
         if self._stop_listening_func:
             try:
@@ -94,14 +98,23 @@ class CommandListener:
     def set_processing(self, is_processing: bool):
         """
         Notify the listener whether a command is currently being executed.
-        While processing:
-          - silence timer is paused (don't sleep mid-task)
-          - new commands from audio are ignored
-        After processing ends, silence timer restarts.
+        While processing, the latest new utterance is held for the next turn.
+        After processing ends, it is dispatched instead of silently discarded.
         """
-        self._is_processing = is_processing
+        pending = None
+        with self._state_lock:
+            self._is_processing = is_processing
+            if not is_processing and self._pending_command:
+                pending = self._pending_command
+                self._pending_command = None
         if not is_processing:
             self._reset_silence_timer()
+            if pending:
+                log.info(f"CommandListener: Dispatching queued follow-up -> '{pending}'")
+                try:
+                    self._on_command(pending)
+                except Exception as e:
+                    log.error(f"CommandListener: queued on_command error: {e}")
 
     # ─── Background listener init ──────────────────────────────────────────────
 
@@ -238,18 +251,24 @@ class CommandListener:
             transcript = ""
 
         if transcript and len(transcript) > 2:
-            log.info(f"CommandListener: Heard → '{transcript}'")
-            # Reset silence timer — user is active
-            self._reset_silence_timer()
-            # Don't stack commands while one is running
-            if not self._is_processing:
-                try:
-                    self._on_command(transcript)
-                except Exception as e:
-                    log.error(f"CommandListener: on_command error: {e}")
+            self._route_transcript(transcript)
         else:
             # Empty or noise — go back to idle visual state
             self._notify_speech_end()
+
+    def _route_transcript(self, transcript):
+        """Dispatch now, or preserve the latest follow-up while a task runs."""
+        log.info(f"CommandListener: Heard -> '{transcript}'")
+        self._reset_silence_timer()
+        with self._state_lock:
+            if self._is_processing:
+                self._pending_command = transcript
+                log.info("CommandListener: Queued follow-up while the current task is processing.")
+                return
+        try:
+            self._on_command(transcript)
+        except Exception as e:
+            log.error(f"CommandListener: on_command error: {e}")
 
     def _notify_speech_end(self):
         if self._on_speech_end:

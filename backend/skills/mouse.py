@@ -3,12 +3,123 @@ Phase 3 — The Hands: Upgraded mouse skills using pywinauto UIAutomation.
 Provides coordinate-free clicking by element name + window focus control.
 """
 import time
+import re
+import threading
+import json
 import pyautogui
 import pygetwindow as gw
 from pywinauto import Desktop
 from utils.logger import log
+from core.task_control import check_cancelled, TaskCancelled
+from perception.text_targeting import (
+    TextCandidate,
+    build_ocr_candidates,
+    build_tesseract_candidates,
+    normalize_text,
+    select_text_candidate,
+)
 
 pyautogui.FAILSAFE = False
+
+_ocr_readers = {}
+_ocr_lock = threading.Lock()
+
+
+def _get_ocr_reader():
+    """Reuse the expensive OCR model, respecting the selected compute device."""
+    from core.settings import SettingsManager
+    device = SettingsManager.get("vision_device", "auto")
+    with _ocr_lock:
+        if device not in _ocr_readers:
+            import easyocr
+            gpu = device == "cuda"
+            if device == "auto":
+                import torch
+                gpu = torch.cuda.is_available()
+            _ocr_readers[device] = easyocr.Reader(['en'], gpu=gpu, verbose=False)
+        return _ocr_readers[device]
+
+
+def _window_snapshot(win):
+    return (win._hWnd, win.left, win.top, win.right, win.bottom)
+
+
+def _click_observed_point(snapshot, x, y):
+    """Reject stale window coordinates and honor a stop received during vision."""
+    check_cancelled()
+    current = gw.getActiveWindow()
+    if not current or _window_snapshot(current) != snapshot:
+        return "Error: The active window moved or changed. Observe again before clicking."
+    _, left, top, right, bottom = snapshot
+    if not left <= x < right or not top <= y < bottom:
+        return "Error: Vision returned a point outside the captured window."
+    pyautogui.click(x=x, y=y)
+    return None
+
+
+def _window_bounds(win):
+    return (win.left, win.top, win.right, win.bottom)
+
+
+def _uia_text_candidates(win, control_types=None):
+    """Collect accessible labels without clicking the first partial match."""
+    candidates = []
+    types = control_types or [
+        "Button", "MenuItem", "ListItem", "Hyperlink", "CheckBox",
+        "RadioButton", "Edit", "Text",
+    ]
+    app = Desktop(backend="uia").window(handle=win._hWnd)
+    for control_type in types:
+        try:
+            controls = app.descendants(control_type=control_type)
+        except Exception:
+            continue
+        for control in controls:
+            try:
+                name = (control.element_info.name or control.window_text() or "").strip()
+                rect = control.rectangle()
+                if not name or rect.width() <= 0 or rect.height() <= 0:
+                    continue
+                if not (win.left <= (rect.left + rect.right) // 2 < win.right
+                        and win.top <= (rect.top + rect.bottom) // 2 < win.bottom):
+                    continue
+                candidates.append(TextCandidate(
+                    name, rect.left, rect.top, rect.right, rect.bottom,
+                    1.0, f"uia-{control_type.lower()}", control,
+                ))
+            except Exception:
+                continue
+    return candidates
+
+
+def _tesseract_candidates(img, win):
+    import os
+    import pytesseract
+    tesseract_path = r"C:\Program Files\Tesseract-OCR\tesseract.exe"
+    if os.path.exists(tesseract_path):
+        pytesseract.pytesseract.tesseract_cmd = tesseract_path
+    data = pytesseract.image_to_data(img, output_type=pytesseract.Output.DICT)
+    return build_tesseract_candidates(data, win.left, win.top)
+
+
+def _ocr_candidates(img, win, reader=None):
+    if reader is not None:
+        import numpy as np
+        return build_ocr_candidates(reader.readtext(np.array(img)), win.left, win.top)
+    return _tesseract_candidates(img, win)
+
+
+def _parse_json_object(value):
+    """Parse a single JSON object, tolerating Markdown fences but no prose."""
+    text = str(value or "").strip()
+    text = re.sub(r"^```(?:json)?\s*|\s*```$", "", text, flags=re.IGNORECASE)
+    match = re.fullmatch(r"\s*(\{.*\})\s*", text, flags=re.DOTALL)
+    if not match:
+        raise ValueError("response was not one JSON object")
+    parsed = json.loads(match.group(1))
+    if not isinstance(parsed, dict):
+        raise ValueError("response was not a JSON object")
+    return parsed
 
 
 def click(x: int, y: int) -> str:
@@ -36,15 +147,16 @@ def scroll(clicks: int) -> str:
     return f"Scrolled by {clicks} units"
 
 
-def click_element(name: str, timeout: float = 5.0) -> str:
+def click_element(name: str, timeout: float = 5.0, region: str = "any", exact: bool = True) -> str:
     """
     Find a UI element by its accessible name anywhere in the active window
     and click it — no coordinates needed.
 
     Args:
         name: The text/label/name of the button, link, or control to click.
-              Case-insensitive partial match is attempted.
         timeout: How many seconds to wait for the element to appear.
+        region: Optional window region such as left, top_right, or bottom_right.
+        exact: Prefer an exact accessible label. Fuzzy matching remains strict.
 
     Returns:
         Success or failure message for the LLM.
@@ -53,62 +165,43 @@ def click_element(name: str, timeout: float = 5.0) -> str:
     deadline = time.time() + timeout
 
     while time.time() < deadline:
+        check_cancelled()
         try:
             win = gw.getActiveWindow()
             if not win:
                 return "Error: No active window found."
 
-            app = Desktop(backend="uia").window(handle=win._hWnd)
-
-            # Search across all common interactive control types
-            exact_match = None
-            partial_match = None
-            
-            for control_type in ["Button", "MenuItem", "ListItem", "Hyperlink", "CheckBox", "RadioButton", "Edit"]:
-                try:
-                    controls = app.descendants(control_type=control_type)
-                    for ctrl in controls:
-                        ctrl_name = (ctrl.element_info.name or "").strip()
-                        if not ctrl_name:
-                            continue
-                            
-                        # Ensure element has valid coordinates
-                        rect = ctrl.rectangle()
-                        if rect.width() <= 0 or rect.height() <= 0:
-                            continue
-                            
-                        # Check exact match first
-                        if name.lower() == ctrl_name.lower():
-                            exact_match = (ctrl, ctrl_name, rect)
-                            break
-                        # Check partial match as fallback
-                        elif name.lower() in ctrl_name.lower():
-                            if partial_match is None:
-                                partial_match = (ctrl, ctrl_name, rect)
-                                
-                    if exact_match:
-                        break
-                except Exception:
-                    continue
-                    
-            target = exact_match or partial_match
+            candidates = _uia_text_candidates(
+                win,
+                ["Button", "MenuItem", "ListItem", "Hyperlink", "CheckBox", "RadioButton", "Edit"],
+            )
+            target, error = select_text_candidate(
+                candidates, name, _window_bounds(win), region=region, exact=exact,
+                min_confidence=1.0,
+            )
             if target:
-                ctrl, ctrl_name, rect = target
-                cx = (rect.left + rect.right) // 2
-                cy = (rect.top + rect.bottom) // 2
-                log.info(f"Found '{ctrl_name}' at ({cx}, {cy}) [Exact: {exact_match is not None}]. Clicking.")
-                ctrl.click_input()
-                return f"Clicked element '{ctrl_name}' at ({cx}, {cy})."
+                cx, cy = target.center
+                log.info("Found reliable UIA target '%s' at (%s, %s).", target.text, cx, cy)
+                check_cancelled()
+                target.payload.click_input()
+                return (
+                    f"Success: Clicked accessible element '{target.text}' at ({cx}, {cy}) "
+                    f"in region '{region}'."
+                )
+            if error and "Ambiguous" in error:
+                return error
 
+        except TaskCancelled:
+            raise
         except Exception as e:
             log.warning(f"click_element search error: {e}")
 
         time.sleep(0.3)
 
     return (
-        f"Error: Could not find a UI element named '{name}' in the active window "
+        f"Error: Could not find one reliable UI element named '{name}' in the active window "
         f"after {timeout:.0f}s. Use observe() to see what's actually on screen, "
-        f"then try click(x, y) with the exact coordinates instead."
+        f"then narrow the target text or region."
     )
 
 
@@ -139,216 +232,272 @@ def find_window(app_name: str) -> str:
             win.activate()
             time.sleep(0.4)
             log.info(f"Activated window: '{win.title}'")
-            return f"Window '{win.title}' brought to foreground."
+            return f"Success: Window '{win.title}' brought to foreground."
         else:
-            return f"No open window found matching '{app_name}'. The app may not be running — try opening it first."
+            return f"Error: No open window found matching '{app_name}'. The app may not be running."
 
     except Exception as e:
         log.error(f"find_window error: {e}")
         return f"Error focusing window '{app_name}': {e}"
 
 
-def click_text(text: str, timeout: float = 5.0) -> str:
-    """
-    Find exact text visually on the active window using OCR and click it.
-    Attempts to use EasyOCR for hyper-accuracy, falls back to Tesseract.
-    """
-    import os
+def _locate_text(text, timeout=5.0, region="any", exact=True):
+    """Locate one unambiguous label and return its candidate plus window lease."""
     from PIL import ImageGrab
-    import numpy as np
-    
-    log.info(f"Searching visually (OCR) for text: '{text}'")
-    deadline = time.time() + timeout
-    text_lower = text.lower()
+    if not normalize_text(text):
+        return None, None, "Error: Provide non-empty text to find."
 
-    while time.time() < deadline:
-        win = gw.getActiveWindow()
-        if not win:
-            return "Error: No active window found for OCR."
-        
-        bbox = (win.left, win.top, win.right, win.bottom)
-        img = ImageGrab.grab(bbox)
-        
-    # Initialize EasyOCR once per function call, outside the loop
-    reader = None
-    use_gpu = False
     try:
-        import easyocr
-        import warnings
-        warnings.filterwarnings("ignore", category=UserWarning, module="torch")
-        from core.settings import SettingsManager
-        v_device = SettingsManager.get("vision_device", "auto")
-        if v_device == "cuda":
-            use_gpu = True
-        elif v_device == "auto":
-            import torch
-            use_gpu = torch.cuda.is_available()
-        reader = easyocr.Reader(['en'], gpu=use_gpu, verbose=False)
-    except Exception as e:
-        log.warning(f"EasyOCR init failed: {e}")
+        min_confidence = float(__import__("core.settings", fromlist=["SettingsManager"])
+                               .SettingsManager.get("vision_min_ocr_confidence", 0.50))
+    except (TypeError, ValueError):
+        min_confidence = 0.50
+    min_confidence = max(0.0, min(1.0, min_confidence))
 
-    while time.time() < deadline:
+    reader = None
+    try:
+        reader = _get_ocr_reader()
+    except Exception as exc:
+        log.warning(f"EasyOCR init failed; using Tesseract: {exc}")
+
+    deadline = time.monotonic() + max(0.0, float(timeout))
+    last_error = None
+    while time.monotonic() < deadline:
+        check_cancelled()
         win = gw.getActiveWindow()
         if not win:
-            return "Error: No active window found for OCR."
-        
-        bbox = (win.left, win.top, win.right, win.bottom)
-        img = ImageGrab.grab(bbox)
-        
+            return None, None, "Error: No active window found for text targeting."
+        snapshot = _window_snapshot(win)
+
+        # Accessibility labels are more reliable than pixels. Prefer them when
+        # one unique target is exposed, then fall back to OCR.
         try:
-            if reader:
-                img_np = np.array(img)
-                results = reader.readtext(img_np)
-                
-                # First pass: try exact or substring match
-                for (bbox_cords, word, prob) in results:
-                    word_lower = word.lower()
-                    # Check if target is in detected word, OR if a significant chunk of target matches detected word
-                    if text_lower in word_lower or (len(text_lower) >= 4 and text_lower[:4] in word_lower and text_lower[-4:] in word_lower):
-                        x_center = int((bbox_cords[0][0] + bbox_cords[1][0]) / 2)
-                        y_center = int((bbox_cords[0][1] + bbox_cords[2][1]) / 2)
-                        
-                        x = win.left + x_center
-                        y = win.top + y_center
-                        
-                        log.info(f"[EasyOCR] Found '{word}' at ({x}, {y}). Clicking.")
-                        pyautogui.click(x=x, y=y)
-                        return f"Clicked visual text '{word}' at ({x}, {y})."
-                        
-                # Second pass: What if EasyOCR split "Gopal ji yadav" into "Gopal", "ji", "yadav"?
-                # Check for partial matches that are very close
-                parts = text_lower.split()
-                if len(parts) > 1:
-                    for (bbox_cords, word, prob) in results:
-                        word_lower = word.lower()
-                        # If the longest word in the target is in the detected text, click it.
-                        longest_part = max(parts, key=len)
-                        if len(longest_part) > 4 and longest_part in word_lower:
-                            x_center = int((bbox_cords[0][0] + bbox_cords[1][0]) / 2)
-                            y_center = int((bbox_cords[0][1] + bbox_cords[2][1]) / 2)
-                            
-                            x = win.left + x_center
-                            y = win.top + y_center
-                            
-                            log.info(f"[EasyOCR] Found partial match '{word}' for '{text}'. Clicking.")
-                            pyautogui.click(x=x, y=y)
-                            return f"Clicked visual text '{word}' at ({x}, {y})."
+            uia_candidates = _uia_text_candidates(win)
+            target, error = select_text_candidate(
+                uia_candidates, text, _window_bounds(win), region=region,
+                exact=exact, min_confidence=1.0,
+            )
+            if target:
+                return target, snapshot, None
+            if error and "Ambiguous" in error:
+                return None, snapshot, error
+        except TaskCancelled:
+            raise
+        except Exception as exc:
+            log.debug(f"UIA text targeting unavailable: {exc}")
 
-            else:
-                # FALLBACK TO TESSERACT
-                try:
-                    import pytesseract
-                    tesseract_path = r"C:\Program Files\Tesseract-OCR\tesseract.exe"
-                    if os.path.exists(tesseract_path):
-                        pytesseract.pytesseract.tesseract_cmd = tesseract_path
+        try:
+            img = ImageGrab.grab(_window_bounds(win), all_screens=True)
+            candidates = _ocr_candidates(img, win, reader)
+            target, error = select_text_candidate(
+                candidates, text, _window_bounds(win), region=region,
+                exact=exact, min_confidence=min_confidence,
+            )
+            if target:
+                return target, snapshot, None
+            last_error = error
+            if error and "Ambiguous" in error:
+                return None, snapshot, error
+        except TaskCancelled:
+            raise
+        except Exception as exc:
+            last_error = f"Error: OCR targeting failed: {exc}"
+            log.warning(last_error)
+        time.sleep(0.35)
 
-                    data = pytesseract.image_to_data(img, output_type=pytesseract.Output.DICT)
-                    for i in range(len(data['text'])):
-                        word = data['text'][i].strip().lower()
-                        if text_lower in word and len(word) > 2:
-                            x = win.left + data['left'][i] + (data['width'][i] // 2)
-                            y = win.top + data['top'][i] + (data['height'][i] // 2)
-                            log.info(f"[Tesseract] Found '{word}' at ({x}, {y}). Clicking.")
-                            pyautogui.click(x=x, y=y)
-                            return f"Clicked visual text '{word}' at ({x}, {y})."
-                except Exception as te:
-                    log.warning(f"Tesseract fallback error: {te}")
-                    
-        except Exception as e:
-            log.warning(f"click_text OCR error: {e}")
-            
-        time.sleep(0.5)
-        
-    return f"Error: Could not find the text '{text}' visually on the screen after {timeout:.0f}s."
+    return None, None, last_error or (
+        f"Error: Could not find one reliable match for '{text}' after {timeout:.0f}s."
+    )
+
+
+def verify_text(text: str, timeout: float = 3.0, region: str = "any", exact: bool = True) -> str:
+    """Verify one unambiguous label without moving the mouse."""
+    log.info("Verifying text '%s' in region '%s'.", text, region)
+    target, _snapshot, error = _locate_text(text, timeout, region, exact)
+    if error:
+        return error
+    x, y = target.center
+    return (
+        f"Success: Verified exact visual identity '{target.text}' at ({x}, {y}) "
+        f"in region '{region}' using {target.source}."
+    )
+
+
+def click_text(text: str, timeout: float = 5.0, region: str = "any", exact: bool = True) -> str:
+    """Click one reliable UIA/OCR text target, refusing ambiguous matches."""
+    log.info("Searching for reliable text target '%s' in region '%s'.", text, region)
+    target, snapshot, error = _locate_text(text, timeout, region, exact)
+    if error:
+        return error
+    check_cancelled()
+    x, y = target.center
+    if target.payload is not None and str(target.source).startswith("uia-"):
+        current = gw.getActiveWindow()
+        if not current or _window_snapshot(current) != snapshot:
+            return "Error: The active window moved or changed. Observe again before clicking."
+        target.payload.click_input()
+    else:
+        error = _click_observed_point(snapshot, x, y)
+        if error:
+            return error
+    return (
+        f"Success: Clicked verified text '{target.text}' at ({x}, {y}) "
+        f"in region '{region}' using {target.source}."
+    )
 
 
 def click_visual(description: str) -> str:
-    """
-    Find and click any UI element, icon, or text using Cloud LLM Vision (e.g. Gemini).
-    This bypasses local OCR and sends a screenshot to the LLM to get exact coordinates.
-    Use this when local click_text fails, or when clicking non-text icons (e.g., "gear icon").
-    """
+    """Use cloud vision to propose and independently verify one target."""
     import base64
     import io
-    import time
     from PIL import ImageGrab
-    from brain.llm_provider import get_active_model, _make_gemini_request
     from core.settings import SettingsManager
     
     log.info(f"Visual Click Request: '{description}'")
     
-    # 1. Check if Cloud Vision is enabled in settings
     vision_mode = SettingsManager.get("vision_engine_type", "Cloud (LLM Vision)")
     if "Local" in vision_mode:
         log.info("Cloud vision is disabled, falling back to click_text")
         return click_text(description)
+
+    if not description.strip():
+        return "Error: Provide a description of the element to find."
+    check_cancelled()
         
     win = gw.getActiveWindow()
     if not win:
         return "Error: No active window to look at."
         
-    # 2. Take screenshot of active window
     bbox = (win.left, win.top, win.right, win.bottom)
-    img = ImageGrab.grab(bbox)
+    snapshot = _window_snapshot(win)
+    img = ImageGrab.grab(bbox, all_screens=True)
     width, height = img.size
     
     buffered = io.BytesIO()
     img.save(buffered, format="JPEG", quality=85)
     img_b64 = base64.b64encode(buffered.getvalue()).decode("utf-8")
     
-    # 3. Ask Gemini for coordinates
     prompt = (
-        f"You are a robotic vision system. Locate the following UI element on the screen: '{description}'.\n"
-        f"The image size is {width}x{height} pixels.\n"
-        "Reply ONLY with the exact X and Y coordinates of the center of that element in this exact format: X,Y\n"
-        "If you absolutely cannot find it, reply with: NOT_FOUND"
+        "Act as a cautious UI target detector. Never guess and never choose a nearby item.\n"
+        f"Target: {description!r}\nImage coordinates: 0,0 to {width - 1},{height - 1}.\n"
+        "Return exactly one JSON object with this schema: "
+        '{"found":true,"confidence":0.0,"label":"visible identity",'
+        '"bbox":[left,top,right,bottom],"point":[x,y],"alternatives":0,"reason":"short reason"}. '
+        "The point must be inside the target bbox. If the exact target is absent, partly hidden, "
+        "or more than one plausible target exists, return found=false and do not guess."
     )
     
     try:
-        from brain.llm_provider import FAST_MODEL, ACTIVE_URL, ACTIVE_KEY
-        
-        # We can construct the OpenAI compat payload for Gemini
-        payload = {
-            "model": FAST_MODEL or "gemini-3.5-flash",
-            "messages": [
-                {
-                    "role": "user",
-                    "content": [
-                        {"type": "text", "text": prompt},
-                        {"type": "image_url", "image_url": {"url": f"data:image/jpeg;base64,{img_b64}"}}
-                    ]
-                }
-            ],
-            "max_tokens": 15,
-            "temperature": 0.0
-        }
+        from brain import llm_provider
+        if not llm_provider.FAST_MODEL:
+            llm_provider.initialize_models()
+        model = llm_provider.FAST_MODEL
+        base = llm_provider.ACTIVE_URL
+        if not model or not base:
+            return "Error: No configured model is available for visual clicking."
+        check_cancelled()
         
         import requests
-        headers = {"Authorization": f"Bearer {ACTIVE_KEY}", "Content-Type": "application/json"}
-        # Ensure we have the base chat completion endpoint if ACTIVE_URL doesn't end in chat/completions
-        base = ACTIVE_URL.rstrip('/') if ACTIVE_URL else "https://generativelanguage.googleapis.com/v1beta/openai"
-        url = f"{base}/chat/completions"
-        
-        log.info(f"Querying Cloud Vision ({FAST_MODEL}) for coordinates...")
-        resp = requests.post(url, headers=headers, json=payload, timeout=15)
-        resp.raise_for_status()
-        
-        result_text = resp.json()["choices"][0]["message"]["content"].strip()
-        log.info(f"Cloud Vision responded: {result_text}")
-        
-        if "NOT_FOUND" in result_text or "," not in result_text:
-            return f"Error: Cloud Vision could not locate '{description}'."
-            
-        parts = result_text.replace(" ", "").split(",")
-        local_x = int(float(parts[0]))
-        local_y = int(float(parts[1]))
+        headers = {"Authorization": f"Bearer {llm_provider.ACTIVE_KEY}", "Content-Type": "application/json"}
+        url = f"{base.strip().rstrip('/')}/chat/completions"
+
+        def request_vision(text_prompt, image_data):
+            payload = {
+                "model": model,
+                "messages": [{
+                    "role": "user",
+                    "content": [
+                        {"type": "text", "text": text_prompt},
+                        {"type": "image_url", "image_url": {"url": f"data:image/jpeg;base64,{image_data}"}},
+                    ],
+                }],
+                "max_tokens": 220,
+                "temperature": 0.0,
+            }
+            response = requests.post(url, headers=headers, json=payload, timeout=20)
+            check_cancelled()
+            response.raise_for_status()
+            return _parse_json_object(response.json()["choices"][0]["message"]["content"])
+
+        log.info(f"Querying Cloud Vision ({model}) for a bounded target proposal...")
+        proposal = request_vision(prompt, img_b64)
+        if proposal.get("found") is not True:
+            return f"Error: Cloud Vision could not uniquely locate '{description}'."
+        try:
+            confidence = float(proposal["confidence"])
+            box = [int(round(float(value))) for value in proposal["bbox"]]
+            point = [int(round(float(value))) for value in proposal["point"]]
+            alternatives = int(proposal.get("alternatives", 0))
+        except (KeyError, TypeError, ValueError):
+            return "Error: Cloud Vision returned an incomplete target proposal."
+
+        try:
+            threshold = float(SettingsManager.get("vision_cloud_confidence", 0.86))
+        except (TypeError, ValueError):
+            threshold = 0.86
+        threshold = max(0.70, min(0.99, threshold))
+        if confidence < threshold:
+            return (
+                f"Error: Cloud Vision confidence {confidence:.2f} is below the required "
+                f"{threshold:.2f}; refusing to click."
+            )
+        if alternatives > 0:
+            return "Error: Cloud Vision found multiple plausible targets; refusing an ambiguous click."
+        if len(box) != 4 or len(point) != 2:
+            return "Error: Cloud Vision returned malformed target geometry."
+        left, top, right, bottom = box
+        local_x, local_y = point
+        if not (0 <= left < right <= width and 0 <= top < bottom <= height):
+            return "Error: Cloud Vision returned a bounding box outside the captured image."
+        if not (left <= local_x < right and top <= local_y < bottom):
+            return "Error: Cloud Vision returned a click point outside its own target box."
+        area_ratio = ((right - left) * (bottom - top)) / max(1, width * height)
+        if area_ratio > 0.60:
+            return "Error: Cloud Vision target box is too broad to click safely."
+
+        # Verify a padded crop in a second model call. The verifier does not see
+        # the full screen coordinates, so it must judge the proposed identity.
+        pad_x = max(8, int((right - left) * 0.35))
+        pad_y = max(8, int((bottom - top) * 0.60))
+        crop_box = (
+            max(0, left - pad_x), max(0, top - pad_y),
+            min(width, right + pad_x), min(height, bottom + pad_y),
+        )
+        crop = img.crop(crop_box)
+        crop_buffer = io.BytesIO()
+        crop.save(crop_buffer, format="JPEG", quality=92)
+        crop_b64 = base64.b64encode(crop_buffer.getvalue()).decode("utf-8")
+        verify_prompt = (
+            f"Verify whether this crop clearly contains the exact UI target {description!r}. "
+            "Nearby labels do not count. Return exactly one JSON object: "
+            '{"match":true,"confidence":0.0,"label":"visible identity","reason":"short reason"}. '
+            "Return match=false if uncertain, clipped, or ambiguous."
+        )
+        check_cancelled()
+        verification = request_vision(verify_prompt, crop_b64)
+        try:
+            verification_confidence = float(verification["confidence"])
+        except (KeyError, TypeError, ValueError):
+            return "Error: Cloud Vision verifier returned an incomplete result."
+        if verification.get("match") is not True or verification_confidence < threshold:
+            return (
+                f"Error: Cloud Vision could not verify '{description}' with enough confidence; "
+                "no click was made."
+            )
         
         abs_x = win.left + local_x
         abs_y = win.top + local_y
         
-        pyautogui.click(x=abs_x, y=abs_y)
-        return f"Cloud Vision clicked '{description}' at ({abs_x}, {abs_y})"
+        error = _click_observed_point(snapshot, abs_x, abs_y)
+        if error:
+            return error
+        return (
+            f"Success: Cloud Vision proposed and verified '{description}' "
+            f"and clicked it at ({abs_x}, {abs_y})."
+        )
         
+    except TaskCancelled:
+        raise
     except Exception as e:
         log.error(f"Cloud Vision error: {e}")
         return f"Error using Cloud Vision: {e}. Try click_text instead."

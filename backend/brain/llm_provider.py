@@ -5,6 +5,7 @@ import concurrent.futures
 from perception.vision_engine import capture_screen_b64
 from core.settings import SettingsManager
 from utils.logger import log
+from core.task_control import check_cancelled, TaskCancelled
 
 ACTIVE_MODEL = None
 ACTIVE_URL = None
@@ -133,6 +134,7 @@ def initialize_models() -> int:
 
 def generate_response(prompt: str, history: list, retries=1, expert_override=False) -> dict:
     global FAST_MODEL, EXPERT_MODEL, ACTIVE_URL, ACTIVE_KEY
+    check_cancelled()
     
     if not FAST_MODEL:
         FAST_MODEL, EXPERT_MODEL, ACTIVE_URL, ACTIVE_KEY = get_best_model()
@@ -182,10 +184,12 @@ def generate_response(prompt: str, history: list, retries=1, expert_override=Fal
     
     log.info(f"Querying brain using active model: {active_m} via {ACTIVE_URL}")
     try:
+        check_cancelled()
         timeout = float(SettingsManager.get("backend_timeout", 30.0))
         if timeout < 25.0:
             timeout = 25.0
         response = requests.post(url, headers=headers, json=payload, timeout=timeout)
+        check_cancelled()
         response.raise_for_status()
         
         data = response.json()
@@ -213,7 +217,10 @@ def generate_response(prompt: str, history: list, retries=1, expert_override=Fal
                 "actions": [{"skill": "reply", "args": {}}]
             }
         
+    except TaskCancelled:
+        raise
     except Exception as e:
+        check_cancelled()
         log.warning(f"Active model {active_m} failed: {e}.")
         if retries > 0:
             log.info("Finding a new best model to retry...")

@@ -161,8 +161,8 @@ from PIL import ImageGrab
 import os
 from utils.logger import log
 
-if os.path.exists(r'C:\Program Files\Tesseract-OCR\tesseract.exe'):
-    pytesseract.pytesseract.tesseract_cmd = r'C:\Program Files\Tesseract-OCR\tesseract.exe'
+if os.path.exists(r'C:\\Program Files\\Tesseract-OCR\\tesseract.exe'):
+    pytesseract.pytesseract.tesseract_cmd = r'C:\\Program Files\\Tesseract-OCR\\tesseract.exe'
 
 def get_ocr_elements(win, center_x):
     elements = []

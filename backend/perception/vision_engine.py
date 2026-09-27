@@ -10,13 +10,22 @@ from perception.ocr_parser import get_ocr_elements
 from utils.logger import log
 
 def capture_screen_b64() -> str:
-    img = pyautogui.screenshot()
-    
-    # Scale down to save tokens/latency
-    img.thumbnail((1280, 720), Image.Resampling.LANCZOS)
+    # Keep the model's image aligned with the window described by observe().
+    # pyautogui.screenshot() only captures the primary display on many Windows
+    # systems, which made secondary-monitor interactions visually misleading.
+    win = gw.getActiveWindow()
+    if win and win.width > 0 and win.height > 0:
+        img = ImageGrab.grab(
+            (win.left, win.top, win.right, win.bottom), all_screens=True,
+        )
+    else:
+        img = ImageGrab.grab(all_screens=True)
+
+    # Preserve more text detail than the old 1280x720 JPEG while bounding cost.
+    img.thumbnail((1600, 1000), Image.Resampling.LANCZOS)
     
     buffered = io.BytesIO()
-    img.save(buffered, format="JPEG", quality=70)
+    img.save(buffered, format="JPEG", quality=84)
     return base64.b64encode(buffered.getvalue()).decode('utf-8')
 
 def wait_for_screen_stabilization(bbox=None, max_wait=1.5):

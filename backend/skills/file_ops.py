@@ -7,11 +7,13 @@ All operations expand ~ to the actual user home directory.
 import os
 import shutil
 import stat
+import filecmp
 from utils.logger import log
+from core.known_folders import resolve_user_path
 
 
 def _expand(path: str) -> str:
-    return os.path.expanduser(path.replace("\\", "/"))
+    return resolve_user_path(path)
 
 
 # ──────────────────────────────────────────────────────────────────────────────
@@ -33,7 +35,7 @@ def copy_file(source: str, destination: str) -> str:
     """
     src = _expand(source)
     dst = _expand(destination)
-    log.info(f"Copying '{src}' → '{dst}'")
+    log.info(f"Copying '{src}' -> '{dst}'")
     try:
         if not os.path.exists(src):
             return f"Error: Source not found: {src}"
@@ -47,10 +49,16 @@ def copy_file(source: str, destination: str) -> str:
             # If destination is a directory, copy the file inside it
             if os.path.isdir(dst):
                 dst = os.path.join(dst, os.path.basename(src))
-            os.makedirs(os.path.dirname(dst), exist_ok=True)
+            parent = os.path.dirname(dst)
+            if parent:
+                os.makedirs(parent, exist_ok=True)
             shutil.copy2(src, dst)
 
-        return f"Copied '{os.path.basename(src)}' to '{dst}'"
+        if not os.path.exists(dst):
+            return f"Error: Copy completed without a destination at '{dst}'"
+        if os.path.isfile(src) and not filecmp.cmp(src, dst, shallow=False):
+            return f"Error: Copied file verification failed at '{dst}'"
+        return f"Success: Copied and verified '{os.path.basename(src)}' at '{dst}'"
     except Exception as e:
         log.error(f"copy_file error: {e}")
         return f"Error copying file: {e}"
@@ -71,13 +79,19 @@ def move_file(source: str, destination: str) -> str:
     """
     src = _expand(source)
     dst = _expand(destination)
-    log.info(f"Moving '{src}' → '{dst}'")
+    log.info(f"Moving '{src}' -> '{dst}'")
     try:
         if not os.path.exists(src):
             return f"Error: Source not found: {src}"
-        os.makedirs(os.path.dirname(dst) if not os.path.isdir(dst) else dst, exist_ok=True)
+        destination_is_directory = os.path.isdir(dst)
+        parent = dst if destination_is_directory else os.path.dirname(dst)
+        if parent:
+            os.makedirs(parent, exist_ok=True)
+        actual_dst = os.path.join(dst, os.path.basename(src)) if destination_is_directory else dst
         shutil.move(src, dst)
-        return f"Moved '{os.path.basename(src)}' to '{dst}'"
+        if os.path.exists(src) or not os.path.exists(actual_dst):
+            return f"Error: Move verification failed for '{src}' to '{actual_dst}'"
+        return f"Success: Moved and verified '{os.path.basename(src)}' at '{actual_dst}'"
     except Exception as e:
         log.error(f"move_file error: {e}")
         return f"Error moving file: {e}"
@@ -142,7 +156,9 @@ def create_folder(path: str) -> str:
         if os.path.exists(target):
             return f"Folder already exists: {target}"
         os.makedirs(target, exist_ok=True)
-        return f"Created folder: '{target}'"
+        if not os.path.isdir(target):
+            return f"Error: Folder creation could not be verified at '{target}'"
+        return f"Success: Created and verified folder: '{target}'"
     except Exception as e:
         log.error(f"create_folder error: {e}")
         return f"Error creating folder: {e}"
@@ -227,7 +243,7 @@ def download_file(url: str, destination: str) -> str:
         Success message with the saved path, or an error.
     """
     dst = _expand(destination)
-    log.info(f"Downloading '{url}' → '{dst}'")
+    log.info(f"Downloading '{url}' -> '{dst}'")
     try:
         import requests
         import urllib.parse
@@ -235,7 +251,7 @@ def download_file(url: str, destination: str) -> str:
         # If destination is a folder, infer the filename from the URL
         if os.path.isdir(dst) or not os.path.splitext(dst)[1]:
             filename = os.path.basename(urllib.parse.urlparse(url).path) or "downloaded_file"
-            dst = os.path.join(dst if os.path.isdir(dst) else os.path.expanduser("~/Downloads"), filename)
+            dst = os.path.join(dst if os.path.isdir(dst) else resolve_user_path("~/Downloads"), filename)
 
         os.makedirs(os.path.dirname(dst), exist_ok=True)
 

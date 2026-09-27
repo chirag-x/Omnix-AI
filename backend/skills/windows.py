@@ -119,7 +119,7 @@ def _restore_and_position(hwnd: int, left: int, top: int, width: int, height: in
         win32gui.SetForegroundWindow(hwnd)
     except Exception:
         pass
-    log.info(f"Positioned hwnd={hwnd} → ({left},{top}) {width}×{height}")
+    log.info(f"Positioned hwnd={hwnd} -> ({left},{top}) {width}x{height}")
 
 
 # ──────────────────────────────────────────────────────────────────────────────

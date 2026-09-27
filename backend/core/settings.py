@@ -22,7 +22,9 @@ DEFAULTS = {
     ],
     "wake_words": ["omnix", "hey omnix", "wake up omnix", "yo omnix", "wake up"],
     "sleep_timeout_seconds": 30,
-    "tts_voice": "en-US-ChristopherNeural"
+    "tts_voice": "en-US-ChristopherNeural",
+    "vision_min_ocr_confidence": 0.50,
+    "vision_cloud_confidence": 0.86,
 }
 
 class SettingsManager:

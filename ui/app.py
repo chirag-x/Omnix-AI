@@ -205,8 +205,8 @@ class OmnixApp:
             
         if check_hotkey(stop_hk):
             print("Stopping Generation via Hotkey!")
-            # Add logic here to interrupt streaming/TTS
-            self.page.overlay.append(ft.SnackBar(ft.Text("Generation Stopped"), open=True))
+            trigger_abort()
+            self.page.overlay.append(ft.SnackBar(ft.Text("Stop requested"), open=True))
             self.page.update()
 
     # ══════════════════════════════════════════════════════════════════════════
@@ -888,6 +888,9 @@ class OmnixApp:
     # ══════════════════════════════════════════════════════════════════════════
 
     async def _run_command(self, text: str):
+        if self.is_processing:
+            self._add_system_message("A task is already running. Stop it or wait before starting another.")
+            return
         self.is_processing = True
         if self.command_listener:
             self.command_listener.set_processing(True)
@@ -1032,6 +1035,17 @@ class OmnixApp:
         if mode != "Developer Mode":
             self.backend_dot.bgcolor = "#4CAF50"
             self.backend_label.value = "Brain Ready (External)"
+            try:
+                self.page.update()
+            except Exception:
+                pass
+            return
+
+        developer_provider = SettingsManager.get("developer_provider", "OmniRouter")
+        if developer_provider == "Google AI Studio":
+            self.backend_dot.bgcolor = "#4CAF50"
+            self.backend_label.value = "Brain Ready (Google AI)"
+            log.info("Google AI Studio selected; OmniRoute is not required")
             try:
                 self.page.update()
             except Exception:
